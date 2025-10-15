@@ -1,0 +1,43 @@
+name: Actualizar SharePoint a Azure SQL
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Cada 15 minutos
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Descargar código
+      uses: actions/checkout@v3
+      
+    - name: 🐍 Configurar Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: 📦 Instalar ODBC Driver
+      run: |
+        curl https://packages.microsoft.com/keys/microsoft.asc | apt-key add -
+        curl https://packages.microsoft.com/config/ubuntu/20.04/prod.list > /etc/apt/sources.list.d/mssql-release.list
+        apt-get update
+        ACCEPT_EULA=Y apt-get install -y msodbcsql18
+        apt-get install -y unixodbc-dev
+        
+    - name: 📚 Instalar dependencias
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: 🚀 Ejecutar actualización
+      env:
+        SHAREPOINT_USERNAME: ${{ secrets.SHAREPOINT_USERNAME }}
+        SHAREPOINT_PASSWORD: ${{ secrets.SHAREPOINT_PASSWORD }}
+        SQL_SERVER: ${{ secrets.SQL_SERVER }}
+        SQL_DATABASE: ${{ secrets.SQL_DATABASE }}
+        SQL_USERNAME: ${{ secrets.SQL_USERNAME }}
+        SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+      run: |
+        python sync_script.py
