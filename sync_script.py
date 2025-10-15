@@ -20,24 +20,20 @@ def sync_sharepoint_to_sql():
     VENDEDORAS_CONFIG = [
         {
             "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Alonso Huaman.xlsx",
-            "table_name": "Base_Alonso",  # ⬅️ Esto depende del nombre de la tabla DENTRO del Excel
+            "table_name": "Base_Alonso",
             "rango_filas": "1:10000"
         },
         {
             "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
-            "table_name": "Base_Diana",  # ⬅️ Esto depende del nombre de la tabla DENTRO del Excel
+            "table_name": "Base_Diana",
             "rango_filas": "1:10000"
         },
         {
             "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx",
-            "table_name": "Base_Gerson",  # ⬅️ Esto depende del nombre de la tabla DENTRO del Excel
+            "table_name": "Base_Gerson",
             "rango_filas": "1:10000"
         },
         # ... AGREGA LAS 10 VENDEDORAS
-        # CADA UNA CON:
-        # - path: ruta SharePoint
-        # - table_name: nombre exacto de la tabla en Excel
-        # - rango_filas: qué filas actualiza en Azure SQL
     ]
     
     # Cadena de conexión Azure SQL
@@ -62,24 +58,18 @@ def sync_sharepoint_to_sql():
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # Descargar Excel de SharePoint
-                base_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
-                full_url = f"{base_url}/{config['path']}"
+                # DESCARGAR CON OFFICE365 LIBRARY (CORREGIDO)
+                file_content = download_sharepoint_file_office365(
+                    config['path'], 
+                    SHAREPOINT_USERNAME, 
+                    SHAREPOINT_PASSWORD
+                )
                 
-                session = requests.Session()
-                session.auth = (SHAREPOINT_USERNAME, SHAREPOINT_PASSWORD)
-                
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json'
-                }
-                
-                response = session.get(full_url, headers=headers, timeout=30)
-                response.raise_for_status()
+                if file_content is None:
+                    logging.error(f"❌ No se pudo descargar: {config['path']}")
+                    continue
                 
                 # Leer tabla ESPECÍFICA del Excel
-                file_content = BytesIO(response.content)
-                
                 # Buscar la hoja que contiene la tabla por nombre
                 excel_file = pd.ExcelFile(file_content)
                 tabla_encontrada = False
@@ -128,6 +118,47 @@ def sync_sharepoint_to_sql():
     except Exception as e:
         logging.error(f"💥 Error general: {str(e)}")
         raise e
+
+def download_sharepoint_file_office365(file_path, username, password):
+    """Descargar archivo de SharePoint con autenticación Office365"""
+    try:
+        from office365.sharepoint.client_context import ClientContext
+        from office365.runtime.auth.authentication_context import AuthenticationContext
+        
+        site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
+        
+        logging.info(f"🔐 Autenticando con SharePoint...")
+        
+        # Autenticación
+        ctx_auth = AuthenticationContext(site_url)
+        if ctx_auth.acquire_token_for_user(username, password):
+            ctx = ClientContext(site_url, ctx_auth)
+            
+            # Verificar conexión
+            web = ctx.web
+            ctx.load(web)
+            ctx.execute_query()
+            logging.info(f"✅ Conectado a SharePoint: {web.title}")
+            
+            # Obtener archivo (usar ruta completa)
+            full_path = f"/sites/ASESORASCOMERCIALES/{file_path}"
+            file = ctx.web.get_file_by_server_relative_url(full_path)
+            ctx.load(file)
+            ctx.execute_query()
+            
+            logging.info(f"📥 Descargando: {file.name}")
+            
+            # Descargar contenido
+            file_content = BytesIO(file.read())
+            logging.info(f"✅ Descarga exitosa: {len(file_content.getvalue())} bytes")
+            return file_content
+        else:
+            logging.error("❌ Error de autenticación con SharePoint")
+            return None
+            
+    except Exception as e:
+        logging.error(f"❌ Error descargando archivo: {str(e)}")
+        return None
 
 def actualizar_filas_azure(cursor, df, rango_filas):
     """Actualizar filas específicas en Azure SQL"""
