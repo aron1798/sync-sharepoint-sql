@@ -1,0 +1,4 @@
+pandas==1.5.3
+pyodbc==4.0.35
+requests==2.28.2
+openpyxl==3.0.10
