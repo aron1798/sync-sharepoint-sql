@@ -4,6 +4,8 @@ import requests
 from io import BytesIO
 import os
 import logging
+import time
+from requests_ntlm import HttpNtlmAuth
 
 def sync_sharepoint_to_sql():
     logging.info("🚀 Iniciando ACTUALIZACIÓN SharePoint -> Azure SQL")
@@ -26,12 +28,12 @@ def sync_sharepoint_to_sql():
         {
             "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
             "table_name": "Base_Diana",
-            "rango_filas": "1:10000"
+            "rango_filas": "10001:20000"
         },
         {
             "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx",
             "table_name": "Base_Gerson",
-            "rango_filas": "1:10000"
+            "rango_filas": "20001:30000"
         },
         # ... AGREGA LAS 10 VENDEDORAS
     ]
@@ -45,12 +47,12 @@ def sync_sharepoint_to_sql():
     Pwd={SQL_PASSWORD};
     Encrypt=yes;
     TrustServerCertificate=no;
-    Connection Timeout=30;
+    Connection Timeout=60;
     """
     
     try:
-        # Conectar a Azure SQL
-        conn = pyodbc.connect(connection_string)
+        # Conectar a Azure SQL con reintentos
+        conn = connect_sql_with_retry(connection_string)
         cursor = conn.cursor()
         
         # Procesar cada vendedora
@@ -58,8 +60,8 @@ def sync_sharepoint_to_sql():
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # DESCARGAR CON OFFICE365 LIBRARY (CORREGIDO)
-                file_content = download_sharepoint_file_office365(
+                # DESCARGAR CON REST API + NTLM (SOLUCIÓN CORREGIDA)
+                file_content = download_sharepoint_file_rest_ntlm(
                     config['path'], 
                     SHAREPOINT_USERNAME, 
                     SHAREPOINT_PASSWORD
@@ -69,42 +71,17 @@ def sync_sharepoint_to_sql():
                     logging.error(f"❌ No se pudo descargar: {config['path']}")
                     continue
                 
-                # Leer tabla ESPECÍFICA del Excel
-                # Buscar la hoja que contiene la tabla por nombre
-                excel_file = pd.ExcelFile(file_content)
-                tabla_encontrada = False
+                # Buscar la tabla en el Excel
+                df = find_table_in_excel(file_content, config['table_name'])
                 
-                for sheet_name in excel_file.sheet_names:
-                    try:
-                        # Leer toda la hoja para buscar el nombre de la tabla
-                        df_temp = pd.read_excel(file_content, sheet_name=sheet_name, header=None)
-                        
-                        # Buscar el nombre de la tabla en las celdas
-                        for row_idx, row in df_temp.iterrows():
-                            for col_idx, value in row.items():
-                                if pd.notna(value) and config['table_name'].lower() in str(value).lower():
-                                    # Encontramos la tabla - leer datos desde aquí
-                                    logging.info(f"✅ Tabla '{config['table_name']}' encontrada en hoja: {sheet_name}, fila: {row_idx+1}")
-                                    
-                                    # Leer datos (asumiendo encabezados en la siguiente fila)
-                                    df = pd.read_excel(file_content, sheet_name=sheet_name, header=row_idx)
-                                    
-                                    # Limitar a 10,000 filas máximo
-                                    df = df.head(10000)
-                                    
-                                    # ACTUALIZAR Azure SQL
-                                    actualizar_filas_azure(cursor, df, config['rango_filas'])
-                                    tabla_encontrada = True
-                                    break
-                            
-                            if tabla_encontrada:
-                                break
+                if df is not None and not df.empty:
+                    # Limitar a 10,000 filas máximo
+                    df = df.head(10000)
                     
-                    except Exception as e:
-                        continue
-                
-                if not tabla_encontrada:
-                    logging.error(f"❌ No se encontró la tabla: {config['table_name']}")
+                    # ACTUALIZAR Azure SQL
+                    actualizar_filas_azure(cursor, df, config['rango_filas'])
+                else:
+                    logging.error(f"❌ No se encontró tabla válida: {config['table_name']}")
                 
             except Exception as e:
                 logging.error(f"❌ Error procesando {config['table_name']}: {str(e)}")
@@ -119,45 +96,103 @@ def sync_sharepoint_to_sql():
         logging.error(f"💥 Error general: {str(e)}")
         raise e
 
-def download_sharepoint_file_office365(file_path, username, password):
-    """Descargar archivo de SharePoint con autenticación Office365"""
+def connect_sql_with_retry(connection_string, max_retries=3):
+    """Conectar a SQL con reintentos"""
+    for attempt in range(max_retries):
+        try:
+            conn = pyodbc.connect(connection_string)
+            logging.info(f"✅ Conexión SQL exitosa (intento {attempt + 1})")
+            return conn
+        except pyodbc.OperationalError as e:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 10
+                logging.warning(f"⚠️ Intento {attempt + 1} fallado, reintentando en {wait_time}s: {str(e)}")
+                time.sleep(wait_time)
+            else:
+                logging.error(f"💥 Todos los intentos fallaron: {str(e)}")
+                raise e
+
+def download_sharepoint_file_rest_ntlm(file_path, username, password):
+    """Descargar archivo usando SharePoint REST API + NTLM"""
     try:
-        from office365.sharepoint.client_context import ClientContext
-        from office365.runtime.auth.authentication_context import AuthenticationContext
-        
         site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
         
-        logging.info(f"🔐 Autenticando con SharePoint...")
+        # Construir URL relativa del archivo
+        file_relative_url = f"/sites/ASESORASCOMERCIALES/{file_path}"
         
-        # Autenticación
-        ctx_auth = AuthenticationContext(site_url)
-        if ctx_auth.acquire_token_for_user(username, password):
-            ctx = ClientContext(site_url, ctx_auth)
-            
-            # Verificar conexión
-            web = ctx.web
-            ctx.load(web)
-            ctx.execute_query()
-            logging.info(f"✅ Conectado a SharePoint: {web.title}")
-            
-            # Obtener archivo (usar ruta completa)
-            full_path = f"/sites/ASESORASCOMERCIALES/{file_path}"
-            file = ctx.web.get_file_by_server_relative_url(full_path)
-            ctx.load(file)
-            ctx.execute_query()
-            
-            logging.info(f"📥 Descargando: {file.name}")
-            
-            # Descargar contenido
-            file_content = BytesIO(file.read())
-            logging.info(f"✅ Descarga exitosa: {len(file_content.getvalue())} bytes")
-            return file_content
+        # Codificar para URL
+        encoded_url = requests.utils.quote(file_relative_url)
+        
+        # URL para descargar archivo
+        download_url = f"{site_url}/_api/web/GetFileByServerRelativeUrl('{encoded_url}')/$value"
+        
+        logging.info(f"🔐 Autenticando con NTLM...")
+        logging.info(f"📥 Descargando: {file_path}")
+        
+        # Configurar sesión con autenticación NTLM
+        session = requests.Session()
+        session.auth = HttpNtlmAuth(username, password)
+        
+        headers = {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # Descargar archivo
+        response = session.get(download_url, headers=headers, timeout=60)
+        
+        if response.status_code == 200:
+            logging.info(f"✅ Descarga exitosa: {len(response.content)} bytes")
+            return BytesIO(response.content)
         else:
-            logging.error("❌ Error de autenticación con SharePoint")
+            logging.error(f"❌ Error HTTP {response.status_code}: {response.text}")
             return None
             
     except Exception as e:
         logging.error(f"❌ Error descargando archivo: {str(e)}")
+        return None
+
+def find_table_in_excel(file_content, table_name):
+    """Buscar tabla específica en el Excel"""
+    try:
+        excel_file = pd.ExcelFile(file_content)
+        
+        # Estrategia 1: Buscar por nombre de tabla en celdas
+        for sheet_name in excel_file.sheet_names:
+            try:
+                df_temp = pd.read_excel(file_content, sheet_name=sheet_name, header=None)
+                
+                for row_idx, row in df_temp.iterrows():
+                    for col_idx, value in row.items():
+                        if pd.notna(value) and table_name.lower() in str(value).lower():
+                            logging.info(f"✅ Tabla '{table_name}' encontrada en hoja: {sheet_name}, fila: {row_idx+1}")
+                            df = pd.read_excel(file_content, sheet_name=sheet_name, header=row_idx)
+                            return df
+            except Exception:
+                continue
+        
+        # Estrategia 2: Usar primera hoja con datos
+        logging.info(f"⚠️ No se encontró tabla por nombre, usando primera hoja con datos")
+        try:
+            df = pd.read_excel(file_content, sheet_name=0)
+            return df
+        except Exception:
+            pass
+            
+        # Estrategia 3: Probar todas las hojas
+        for sheet_name in excel_file.sheet_names:
+            try:
+                df = pd.read_excel(file_content, sheet_name=sheet_name)
+                if not df.empty:
+                    logging.info(f"✅ Datos encontrados en hoja: {sheet_name}")
+                    return df
+            except Exception:
+                continue
+                
+        return None
+        
+    except Exception as e:
+        logging.error(f"❌ Error buscando tabla: {str(e)}")
         return None
 
 def actualizar_filas_azure(cursor, df, rango_filas):
@@ -165,50 +200,81 @@ def actualizar_filas_azure(cursor, df, rango_filas):
     # Obtener rango de IDs a actualizar
     start_id, end_id = map(int, rango_filas.split(':'))
     
+    # Normalizar nombres de columnas
+    df.columns = [str(col).strip() for col in df.columns]
+    
+    # Mapeo flexible de columnas
+    mapeo_columnas = {}
+    columnas_requeridas = ['Ejecutivo', 'Telefono', 'FechaCreada', 'Sede', 'Programa', 'Turno', 
+                          'Codigo', 'Canal', 'Intervalo', 'Medio', 'Contacto', 'Interesado', 
+                          'Estado', 'Objecion', 'Observacion']
+    
+    for col_requerida in columnas_requeridas:
+        for col_real in df.columns:
+            if col_requerida.lower() in col_real.lower():
+                mapeo_columnas[col_requerida] = col_real
+                break
+    
+    logging.info(f"🔍 Mapeo de columnas encontradas: {len(mapeo_columnas)}/{len(columnas_requeridas)}")
+    
     # Actualizar fila por fila
+    registros_actualizados = 0
     for index, row in df.iterrows():
         current_id = start_id + index
         
         if current_id > end_id:
-            break  # No sobrepasar el rango asignado
+            break
+        
+        try:
+            # Obtener valores usando mapeo
+            valores = []
+            for col_requerida in columnas_requeridas:
+                col_real = mapeo_columnas.get(col_requerida, col_requerida)
+                valor = row.get(col_real, '')
+                
+                # Manejar fechas
+                if col_requerida == 'FechaCreada' and pd.notna(valor):
+                    try:
+                        if isinstance(valor, str):
+                            valor = pd.to_datetime(valor, errors='coerce')
+                        if pd.notna(valor):
+                            valor = valor.strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            valor = None
+                    except:
+                        valor = None
+                
+                valores.append(valor)
             
-        cursor.execute("""
-            UPDATE vendedoras_data SET
-                Ejecutivo = ?,
-                Telefono = ?,
-                FechaCreada = ?,
-                Sede = ?,
-                Programa = ?,
-                Turno = ?,
-                Codigo = ?,
-                Canal = ?,
-                Intervalo = ?,
-                Medio = ?,
-                Contacto = ?,
-                Interesado = ?,
-                Estado = ?,
-                Objecion = ?,
-                Observacion = ?
-            WHERE ID = ?
-        """, 
-        row.get('Ejecutivo', ''),
-        row.get('Telefono', ''),
-        row.get('FechaCreada', ''),
-        row.get('Sede', ''),
-        row.get('Programa', ''),
-        row.get('Turno', ''),
-        row.get('Codigo', ''),
-        row.get('Canal', ''),
-        row.get('Intervalo', ''),
-        row.get('Medio', ''),
-        row.get('Contacto', ''),
-        row.get('Interesado', ''),
-        row.get('Estado', ''),
-        row.get('Objecion', ''),
-        row.get('Observacion', ''),
-        current_id)
+            valores.append(current_id)
+            
+            cursor.execute("""
+                UPDATE vendedoras_data SET
+                    Ejecutivo = ?,
+                    Telefono = ?,
+                    FechaCreada = ?,
+                    Sede = ?,
+                    Programa = ?,
+                    Turno = ?,
+                    Codigo = ?,
+                    Canal = ?,
+                    Intervalo = ?,
+                    Medio = ?,
+                    Contacto = ?,
+                    Interesado = ?,
+                    Estado = ?,
+                    Objecion = ?,
+                    Observacion = ?
+                WHERE ID = ?
+            """, *valores)
+            
+            registros_actualizados += 1
+            
+        except Exception as e:
+            logging.warning(f"⚠️ Error actualizando ID {current_id}: {str(e)}")
+            continue
     
-    logging.info(f"📊 Actualizadas filas {rango_filas}: {len(df)} registros")
+    logging.info(f"📊 Actualizadas filas {rango_filas}: {registros_actualizados}/{len(df)} registros")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
