@@ -26,14 +26,14 @@ def sync_sharepoint_to_sql():
             "rango_filas": "1:10000"
         },
         {
-            "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
+            "path": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EeRBRnXXABpPhWkYk87UcjoB-VltTBFz6MRSQ-VEbucP8Q?e=Kky7jK",
             "table_name": "Base_Diana",
-            "rango_filas": "10001:20000"
+            "rango_filas": "1:10000"
         },
         {
             "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx",
             "table_name": "Base_Gerson",
-            "rango_filas": "20001:30000"
+            "rango_filas": "1:10000"
         },
         # ... AGREGA LAS 10 VENDEDORAS
     ]
