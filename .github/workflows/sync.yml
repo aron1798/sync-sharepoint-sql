@@ -1,37 +1,39 @@
-name: Actualizar SharePoint a Azure SQL
+name: Sync SharePoint to Azure SQL
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # Cada 15 minutos
-  workflow_dispatch:
+    # Ejecutar cada día a las 6:00 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Permite ejecución manual
 
 jobs:
-  sync:
+  sync-data:
     runs-on: ubuntu-latest
     
     steps:
-    - name: 📥 Descargar código
+    - name: Checkout code
       uses: actions/checkout@v3
       
-    - name: 🐍 Configurar Python
+    - name: Set up Python
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
         
-    - name: 📦 Instalar ODBC Driver
+    - name: Install system dependencies
       run: |
-        curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-        curl https://packages.microsoft.com/config/ubuntu/20.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
         sudo apt-get update
-        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
-        sudo apt-get install -y unixodbc-dev
+        sudo apt-get install -y unixodbc unixodbc-dev
+        sudo apt-get install -y chromium-browser chromium-chromedriver
         
-    - name: 📚 Instalar dependencias
+    - name: Install Python dependencies
       run: |
-        python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: 🚀 Ejecutar actualización
+    - name: Set up Chrome Driver
+      uses: nanasess/setup-chromedriver@v2
+      
+    - name: Run sync script
+      run: python sync_script.py
       env:
         SHAREPOINT_USERNAME: ${{ secrets.SHAREPOINT_USERNAME }}
         SHAREPOINT_PASSWORD: ${{ secrets.SHAREPOINT_PASSWORD }}
@@ -39,5 +41,10 @@ jobs:
         SQL_DATABASE: ${{ secrets.SQL_DATABASE }}
         SQL_USERNAME: ${{ secrets.SQL_USERNAME }}
         SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
-      run: |
-        python sync_script.py
+        
+    - name: Upload log file
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: sync-logs
+        path: sharepoint_sync.log
