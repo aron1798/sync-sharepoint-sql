@@ -63,12 +63,21 @@ def sync_sharepoint_to_sql():
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # DESCARGAR CON MÉTODO SIMPLE (SIN GRAPH API)
-                file_content = download_sharepoint_file_simple(
+                # PRIMERO: Intentar con URL directa de descarga
+                file_content = download_sharepoint_file_direct(
                     config['path'], 
                     SHAREPOINT_USERNAME, 
                     SHAREPOINT_PASSWORD
                 )
+                
+                # SI FALLA: Intentar con método simple
+                if file_content is None:
+                    logging.warning("🔄 Intentando con método simple...")
+                    file_content = download_sharepoint_file_simple(
+                        config['path'], 
+                        SHAREPOINT_USERNAME, 
+                        SHAREPOINT_PASSWORD
+                    )
                 
                 if file_content is None:
                     logging.error(f"❌ No se pudo descargar: {config['path']}")
@@ -115,13 +124,63 @@ def connect_sql_with_retry(connection_string, max_retries=3):
                 logging.error(f"💥 Todos los intentos fallaron: {str(e)}")
                 raise e
 
+def download_sharepoint_file_direct(file_path, username, password):
+    """Usar URL directa de descarga de SharePoint"""
+    try:
+        site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
+        
+        # URL alternativa de descarga directa de SharePoint
+        direct_url = f"{site_url}/_layouts/15/download.aspx?SourceUrl=/{file_path}"
+        
+        logging.info(f"📥 Descargando via URL directa: {file_path}")
+        
+        session = requests.Session()
+        session.auth = (username, password)
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        }
+        
+        response = session.get(direct_url, headers=headers, timeout=60, verify=False, allow_redirects=True)
+        
+        # VERIFICAR SI ES UN EXCEL VÁLIDO
+        if response.status_code == 200:
+            content = response.content
+            
+            # Verificar si es un Excel válido
+            if len(content) > 1000:  # Archivo razonablemente grande
+                # Verificar signature de Excel (PK zip header)
+                if content[:4] == b'PK\x03\x04' or b'xl/' in content[:100] or b'workbook' in content[:1000]:
+                    logging.info(f"✅ Excel válido descargado (URL directa): {len(content)} bytes")
+                    return BytesIO(content)
+                else:
+                    # Verificar si es HTML de error
+                    content_str = content[:500].decode('utf-8', errors='ignore')
+                    if any(keyword in content_str.lower() for keyword in ['<html', 'login', 'error', 'microsoft']):
+                        logging.error(f"❌ Se descargó página HTML/error, no el Excel")
+                        logging.debug(f"Primeros caracteres: {content_str[:200]}")
+                    else:
+                        logging.warning(f"⚠️ Archivo no parece Excel, pero continuando...")
+                        return BytesIO(content)  # Intentar de todos modos
+            else:
+                logging.error(f"❌ Archivo demasiado pequeño: {len(content)} bytes")
+                return None
+        else:
+            logging.error(f"❌ Error URL directa HTTP {response.status_code}")
+            return None
+            
+    except Exception as e:
+        logging.error(f"❌ Error descarga directa: {str(e)}")
+        return None
+
 def download_sharepoint_file_simple(file_path, username, password):
-    """Método simple que funciona sin SPO license"""
+    """Método simple alternativo"""
     try:
         site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
         full_url = f"{site_url}/{file_path}"
         
-        logging.info(f"📥 Descargando: {file_path}")
+        logging.info(f"📥 Descargando via método simple: {file_path}")
         
         session = requests.Session()
         session.auth = (username, password)
@@ -131,29 +190,14 @@ def download_sharepoint_file_simple(file_path, username, password):
             'Accept': '*/*'
         }
         
-        # Probar diferentes métodos
-        methods = [
-            {'verify': False, 'allow_redirects': True},  # Método 1: Sin SSL verification
-            {'verify': True, 'allow_redirects': True},   # Método 2: Con SSL verification
-        ]
+        response = session.get(full_url, headers=headers, timeout=60, verify=False, allow_redirects=True)
         
-        for i, method in enumerate(methods, 1):
-            try:
-                logging.info(f"🔧 Probando método {i}...")
-                response = session.get(full_url, headers=headers, timeout=60, **method)
-                
-                if response.status_code == 200:
-                    logging.info(f"✅ Descarga exitosa (método {i}): {len(response.content)} bytes")
-                    return BytesIO(response.content)
-                else:
-                    logging.warning(f"⚠️ Método {i} falló: HTTP {response.status_code}")
-                    
-            except Exception as e:
-                logging.warning(f"⚠️ Error método {i}: {str(e)}")
-                continue
-        
-        logging.error(f"❌ Todos los métodos de descarga fallaron para: {file_path}")
-        return None
+        if response.status_code == 200 and len(response.content) > 1000:
+            logging.info(f"✅ Descarga simple exitosa: {len(response.content)} bytes")
+            return BytesIO(response.content)
+        else:
+            logging.error(f"❌ Error método simple: HTTP {response.status_code}")
+            return None
             
     except Exception as e:
         logging.error(f"❌ Error descarga simple: {str(e)}")
@@ -162,38 +206,43 @@ def download_sharepoint_file_simple(file_path, username, password):
 def find_table_in_excel(file_content, table_name):
     """Buscar tabla específica en el Excel"""
     try:
-        excel_file = pd.ExcelFile(file_content)
+        # Especificar engine explícitamente para evitar errores
+        excel_file = pd.ExcelFile(file_content, engine='openpyxl')
         
         # Estrategia 1: Buscar por nombre de tabla en celdas
         for sheet_name in excel_file.sheet_names:
             try:
-                df_temp = pd.read_excel(file_content, sheet_name=sheet_name, header=None)
+                df_temp = pd.read_excel(file_content, sheet_name=sheet_name, header=None, engine='openpyxl')
                 
                 for row_idx, row in df_temp.iterrows():
                     for col_idx, value in row.items():
                         if pd.notna(value) and table_name.lower() in str(value).lower():
                             logging.info(f"✅ Tabla '{table_name}' encontrada en hoja: {sheet_name}, fila: {row_idx+1}")
-                            df = pd.read_excel(file_content, sheet_name=sheet_name, header=row_idx)
+                            df = pd.read_excel(file_content, sheet_name=sheet_name, header=row_idx, engine='openpyxl')
                             return df
-            except Exception:
+            except Exception as e:
+                logging.warning(f"⚠️ Error en hoja {sheet_name}: {str(e)}")
                 continue
         
         # Estrategia 2: Usar primera hoja con datos
         logging.info(f"⚠️ No se encontró tabla por nombre, usando primera hoja con datos")
         try:
-            df = pd.read_excel(file_content, sheet_name=0)
-            return df
-        except Exception:
+            df = pd.read_excel(file_content, sheet_name=0, engine='openpyxl')
+            if not df.empty:
+                return df
+        except Exception as e:
+            logging.warning(f"⚠️ Error primera hoja: {str(e)}")
             pass
             
         # Estrategia 3: Probar todas las hojas
         for sheet_name in excel_file.sheet_names:
             try:
-                df = pd.read_excel(file_content, sheet_name=sheet_name)
+                df = pd.read_excel(file_content, sheet_name=sheet_name, engine='openpyxl')
                 if not df.empty:
                     logging.info(f"✅ Datos encontrados en hoja: {sheet_name}")
                     return df
-            except Exception:
+            except Exception as e:
+                logging.warning(f"⚠️ Error hoja {sheet_name}: {str(e)}")
                 continue
                 
         return None
