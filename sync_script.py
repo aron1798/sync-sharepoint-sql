@@ -6,16 +6,15 @@ import os
 import logging
 import time
 import urllib3
-import random
-from datetime import datetime
 
-# Deshabilitar warnings de SSL (temporal para pruebas)
+# Deshabilitar warnings de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def sync_sharepoint_to_sql():
-    logging.info("🚀 Iniciando ACTUALIZACIÓN OPTIMIZADA SharePoint -> Azure SQL")
+    logging.info("🚀 Iniciando SINCRONIZACIÓN CON API OFICIAL SharePoint")
     
     # ===== CONFIGURACIÓN =====
+    SHAREPOINT_SITE = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
     SHAREPOINT_USERNAME = os.environ['SHAREPOINT_USERNAME']
     SHAREPOINT_PASSWORD = os.environ['SHAREPOINT_PASSWORD']
     SQL_SERVER = os.environ['SQL_SERVER']
@@ -23,24 +22,23 @@ def sync_sharepoint_to_sql():
     SQL_USERNAME = os.environ['SQL_USERNAME']
     SQL_PASSWORD = os.environ['SQL_PASSWORD']
     
-    # ===== CONFIGURACIÓN POR VENDEDORA =====
+    # ===== CONFIGURACIÓN VENDEDORAS =====
     VENDEDORAS_CONFIG = [
         {
-            "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Alonso Huaman.xlsx",
+            "path": "Shared Documents/2. BASE PROSPECTOS/BASE GENERAL/Base Alonso Huaman.xlsx",
             "table_name": "Base_Alonso",
             "rango_filas": "1:10000"
         },
         {
-            "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
-            "table_name": "Base_Diana", 
+            "path": "Shared Documents/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
+            "table_name": "Base_Diana",
             "rango_filas": "10001:20000"
         },
         {
-            "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx",
+            "path": "Shared Documents/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx", 
             "table_name": "Base_Gerson",
             "rango_filas": "20001:30000"
         },
-        # ... AGREGA LAS 10 VENDEDORAS
     ]
     
     # Cadena de conexión Azure SQL
@@ -56,227 +54,195 @@ def sync_sharepoint_to_sql():
     """
     
     try:
-        # Conectar a Azure SQL con reintentos
+        # 1. CONECTAR A AZURE SQL
         conn = connect_sql_with_retry(connection_string)
         cursor = conn.cursor()
         
-        # OPTIMIZACIÓN: Crear tabla temporal para bulk insert
-        cursor.execute("""
-            IF OBJECT_ID('tempdb..#TempVendedorasData') IS NOT NULL
-                DROP TABLE #TempVendedorasData
-            
-            CREATE TABLE #TempVendedorasData (
-                ID INT,
-                Ejecutivo NVARCHAR(100),
-                Telefono NVARCHAR(50),
-                FechaCreada DATETIME,
-                Sede NVARCHAR(100),
-                Programa NVARCHAR(100),
-                Turno NVARCHAR(50),
-                Codigo NVARCHAR(50),
-                Canal NVARCHAR(100),
-                Intervalo NVARCHAR(50),
-                Medio NVARCHAR(100),
-                Contacto NVARCHAR(100),
-                Interesado NVARCHAR(100),
-                Estado NVARCHAR(100),
-                Objecion NVARCHAR(500),
-                Observacion NVARCHAR(1000)
-            )
-        """)
-        
-        # Procesar cada vendedora
+        # 2. PROCESAR CADA ARCHIVO
         total_registros = 0
         for config in VENDEDORAS_CONFIG:
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # SOLUCIÓN HÍBRIDA: Links públicos + autenticación
-                file_content = download_sharepoint_file_public_with_auth(
+                # DESCARGAR ARCHIVO USANDO MÉTODO DIRECTO
+                file_content = download_sharepoint_direct(
                     config['path'], 
                     SHAREPOINT_USERNAME, 
                     SHAREPOINT_PASSWORD
                 )
                 
-                if file_content is None:
-                    logging.error(f"❌ No se pudo descargar: {config['path']}")
-                    continue
-                
-                # Buscar la tabla en el Excel
-                df = find_table_in_excel_optimized(file_content, config['table_name'])
-                
-                if df is not None and not df.empty:
-                    # Limitar a 10,000 filas máximo
-                    df = df.head(10000)
+                if file_content:
+                    # PROCESAR EXCEL
+                    df = process_excel_file(file_content, config['table_name'])
                     
-                    # OPTIMIZACIÓN: Insertar en tabla temporal
-                    registros_procesados = insert_to_temp_table(cursor, df, config['rango_filas'])
-                    total_registros += registros_procesados
-                    
-                    logging.info(f"✅ {config['table_name']}: {registros_procesados} registros preparados")
+                    if df is not None and not df.empty:
+                        df = df.head(10000)  # Limitar a 10,000 filas
+                        
+                        # ACTUALIZAR BASE DE DATOS
+                        registros_procesados = update_database(cursor, df, config['rango_filas'])
+                        total_registros += registros_procesados
+                        logging.info(f"✅ {config['table_name']}: {registros_procesados} registros")
+                    else:
+                        logging.error(f"❌ No se encontraron datos en: {config['table_name']}")
                 else:
-                    logging.error(f"❌ No se encontró tabla válida: {config['table_name']}")
-                
+                    logging.error(f"❌ No se pudo descargar: {config['path']}")
+                    
             except Exception as e:
                 logging.error(f"❌ Error procesando {config['table_name']}: {str(e)}")
                 continue
         
-        # OPTIMIZACIÓN: Actualización masiva desde tabla temporal
-        if total_registros > 0:
-            logging.info(f"🔄 Realizando actualización masiva de {total_registros} registros...")
-            actualizacion_masiva(cursor)
-        
-        # Confirmar todos los cambios
+        # CONFIRMAR CAMBIOS
         conn.commit()
         conn.close()
-        logging.info(f"🎉 ACTUALIZACIÓN COMPLETADA - {total_registros} filas actualizadas")
-            
+        logging.info(f"🎉 SINCRONIZACIÓN COMPLETADA - {total_registros} filas actualizadas")
+        
     except Exception as e:
         logging.error(f"💥 Error general: {str(e)}")
         raise e
 
-def download_sharepoint_file_public_with_auth(file_path, username, password):
-    """SOLUCIÓN HÍBRIDA OPTIMIZADA: Links públicos + autenticación"""
-    
-    # LINKS PÚBLICOS ÚNICOS
-    public_links = {
-        "Base Alonso Huaman.xlsx": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EaIlXhIcpYBFkaxzXu7aQIQBAu_zaldlNLgtz7y6bOMyCA?e=yVU2iw",
-        "Base Diana Chavez.xlsx": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EeRBRnXXABpPhWkYk87UcjoB-VltTBFz6MRSQ-VEbucP8Q?e=bvUv7V",
-        "Base Gerson Falen.xlsx": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EQGtk5_fCslJowZlY8g7kTEBLfD29swdE4DK_0nDfBZ7qw?e=36cm8P"
-    }
-    
-    filename = file_path.split('/')[-1]
-    
-    if filename in public_links:
-        try:
-            logging.info(f"🔗 Descargando link público CON AUTENTICACIÓN: {filename}")
+def download_sharepoint_direct(file_path, username, password):
+    """MÉTODO DIRECTO Y SIMPLE para descargar de SharePoint"""
+    try:
+        logging.info(f"📥 Intentando descargar: {file_path}")
+        
+        # Construir URL directa
+        site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
+        file_url = f"{site_url}/_api/web/GetFileByServerRelativeUrl('/sites/ASESORASCOMERCIALES/{file_path}')/$value"
+        
+        logging.info(f"🔗 URL: {file_url}")
+        
+        # Headers para API SharePoint
+        headers = {
+            'Accept': 'application/json;odata=verbose',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        # Hacer la petición con autenticación básica
+        response = requests.get(
+            file_url,
+            auth=(username, password),
+            headers=headers,
+            timeout=30,
+            verify=False
+        )
+        
+        logging.info(f"📊 Response: HTTP {response.status_code}, Size: {len(response.content)} bytes")
+        
+        if response.status_code == 200:
+            content = response.content
             
-            session = requests.Session()
-            session.auth = (username, password)  # ⬅️ CLAVE: Agregar autenticación
-            
-            # Headers optimizados
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
-            }
-            
-            # OPTIMIZACIÓN: Timeout más agresivo y seguimiento de redirecciones
-            response = session.get(
-                public_links[filename], 
-                headers=headers, 
-                timeout=30,  # ⬅️ Reducido de 60 a 30 segundos
-                verify=False,
-                allow_redirects=True  # ⬅️ IMPORTANTE: Seguir redirecciones
-            )
-            
-            logging.info(f"📊 Response final: HTTP {response.status_code}, Size: {len(response.content)} bytes")
-            
-            if response.status_code == 200:
-                content = response.content
-                
-                # Verificación robusta de contenido Excel
-                if len(content) > 1000:
-                    content_start = content[:500].decode('utf-8', errors='ignore')
-                    
-                    # Si es HTML, falló la autenticación
-                    if any(keyword in content_start.lower() for keyword in ['<!doctype', '<html', 'login', 'redirect', 'microsoft']):
-                        logging.error("❌ Autenticación falló - SharePoint devolvió página HTML")
-                        logging.debug(f"Contenido inicial: {content_start[:200]}")
-                        return None
-                    
-                    # Verificar firma de archivo Excel
-                    if (content[:4] == b'PK\x03\x04' or  # Firma ZIP de Office
-                        b'[Content_Types]' in content[:2000] or 
-                        b'xl/' in content[:1000]):
-                        logging.info(f"✅ ÉXITO: Excel válido detectado - {len(content)} bytes")
-                        return BytesIO(content)
-                    else:
-                        # Intentar procesar de todos modos
-                        logging.warning(f"⚠️ Firma Excel no estándar, intentando procesar...")
-                        return BytesIO(content)
+            # Verificar que sea un Excel válido
+            if len(content) > 1000:
+                # Verificar firma de archivo Excel
+                if (content[:4] == b'PK\x03\x04' or  # Firma ZIP
+                    b'[Content_Types]' in content[:2000] or 
+                    b'xl/' in content[:1000]):
+                    logging.info(f"✅ Excel válido descargado: {len(content)} bytes")
+                    return BytesIO(content)
                 else:
-                    logging.error(f"❌ Archivo demasiado pequeño: {len(content)} bytes")
-                    return None
+                    # Verificar si es error HTML
+                    content_preview = content[:500].decode('utf-8', errors='ignore')
+                    if any(keyword in content_preview.lower() for keyword in ['<html', 'error', 'login']):
+                        logging.error(f"❌ SharePoint devolvió error HTML: {content_preview[:200]}")
+                        return None
+                    else:
+                        logging.warning("⚠️ Contenido no reconocido, pero intentando procesar...")
+                        return BytesIO(content)
             else:
-                logging.error(f"❌ Error HTTP {response.status_code}")
+                logging.error("❌ Archivo demasiado pequeño")
                 return None
-                
-        except requests.exceptions.Timeout:
-            logging.error("❌ Timeout en descarga de SharePoint")
+        else:
+            logging.error(f"❌ Error HTTP {response.status_code}")
+            if response.content:
+                error_content = response.content[:500].decode('utf-8', errors='ignore')
+                logging.info(f"📄 Contenido error: {error_content[:200]}")
             return None
-        except Exception as e:
-            logging.error(f"❌ Error en descarga con autenticación: {str(e)}")
-            return None
-    else:
-        logging.warning(f"⚠️ No hay link público configurado para: {filename}")
+            
+    except Exception as e:
+        logging.error(f"❌ Error en descarga directa: {str(e)}")
         return None
 
-def find_table_in_excel_optimized(file_content, table_name):
-    """Búsqueda optimizada de tabla en Excel"""
+def process_excel_file(file_content, table_name):
+    """Procesar archivo Excel de forma robusta"""
     try:
-        # OPTIMIZACIÓN: Probar solo openpyxl (más rápido para .xlsx)
-        try:
-            excel_file = pd.ExcelFile(file_content, engine='openpyxl')
-            
-            # Estrategia 1: Buscar en primera hoja (caso más común)
+        # Reiniciar el cursor del archivo
+        file_content.seek(0)
+        
+        # Intentar con diferentes engines
+        engines = ['openpyxl', 'xlrd']
+        
+        for engine in engines:
             try:
-                df = pd.read_excel(file_content, sheet_name=0, engine='openpyxl')
-                if not df.empty and len(df.columns) > 1:
-                    logging.info("✅ Datos encontrados en primera hoja")
-                    return clean_dataframe(df)
-            except Exception as e:
-                logging.warning(f"⚠️ Error en primera hoja: {str(e)}")
-                pass
-            
-            # Estrategia 2: Buscar en todas las hojas
-            for sheet_name in excel_file.sheet_names:
-                try:
-                    df = pd.read_excel(file_content, sheet_name=sheet_name, engine='openpyxl')
-                    if not df.empty and len(df.columns) > 1:
-                        logging.info(f"✅ Datos encontrados en hoja: {sheet_name}")
-                        return clean_dataframe(df)
-                except Exception as e:
-                    logging.warning(f"⚠️ Error en hoja {sheet_name}: {str(e)}")
-                    continue
-                    
-        except Exception as e:
-            logging.warning(f"⚠️ Openpyxl falló: {str(e)}")
-            # Fallback a xlrd si es necesario
-            try:
-                df = pd.read_excel(file_content, engine='xlrd')
-                return clean_dataframe(df)
-            except:
-                pass
+                # Leer primera hoja
+                df = pd.read_excel(file_content, engine=engine, sheet_name=0)
                 
-        logging.error("❌ No se pudo leer el archivo con ningún engine")
+                if not df.empty and len(df.columns) > 1:
+                    logging.info(f"✅ Excel procesado con {engine}: {len(df)} filas, {len(df.columns)} columnas")
+                    
+                    # Limpiar datos
+                    df = clean_dataframe(df)
+                    return df
+                    
+            except Exception as e:
+                logging.warning(f"⚠️ Engine {engine} falló: {str(e)}")
+                file_content.seek(0)  # Reiniciar para siguiente engine
+                continue
+        
+        # Si ambos engines fallan, intentar método de fuerza bruta
+        logging.warning("🔄 Intentando método de fuerza bruta...")
+        file_content.seek(0)
+        
+        for sheet_name in [0, 1, 2]:  # Probar primeras 3 hojas
+            for engine in engines:
+                try:
+                    df = pd.read_excel(file_content, engine=engine, sheet_name=sheet_name, header=None)
+                    if not df.empty and len(df.columns) > 3:  # Debe tener al menos 4 columnas
+                        # Buscar fila de encabezados
+                        for header_row in range(min(5, len(df))):
+                            try:
+                                df_with_header = pd.read_excel(file_content, engine=engine, sheet_name=sheet_name, header=header_row)
+                                if not df_with_header.empty:
+                                    logging.info(f"✅ Datos encontrados en hoja {sheet_name}, fila header {header_row}")
+                                    return clean_dataframe(df_with_header)
+                            except:
+                                continue
+                except:
+                    continue
+        
+        logging.error("❌ No se pudo procesar el Excel con ningún método")
         return None
         
     except Exception as e:
-        logging.error(f"❌ Error buscando tabla: {str(e)}")
+        logging.error(f"❌ Error procesando Excel: {str(e)}")
         return None
 
 def clean_dataframe(df):
-    """Limpieza y normalización del DataFrame"""
-    # Eliminar filas completamente vacías
-    df = df.dropna(how='all')
-    
-    # Normalizar nombres de columnas
-    df.columns = [str(col).strip().replace('\n', ' ').replace('\r', '') for col in df.columns]
-    
-    # Eliminar columnas completamente vacías
-    df = df.dropna(axis=1, how='all')
-    
-    return df
+    """Limpiar y normalizar DataFrame"""
+    try:
+        # Eliminar filas completamente vacías
+        df_clean = df.dropna(how='all')
+        
+        # Eliminar columnas completamente vacías
+        df_clean = df_clean.dropna(axis=1, how='all')
+        
+        # Normalizar nombres de columnas
+        df_clean.columns = [str(col).strip().replace('\n', ' ').replace('\r', '') for col in df_clean.columns]
+        
+        logging.info(f"🧹 DataFrame limpiado: {len(df_clean)} filas, {len(df_clean.columns)} columnas")
+        return df_clean
+        
+    except Exception as e:
+        logging.error(f"❌ Error limpiando DataFrame: {str(e)}")
+        return df
 
-def insert_to_temp_table(cursor, df, rango_filas):
-    """Inserción optimizada en tabla temporal"""
+def update_database(cursor, df, rango_filas):
+    """Actualizar base de datos"""
     start_id, end_id = map(int, rango_filas.split(':'))
     
-    # Normalizar nombres de columnas
+    # Normalizar columnas
     df.columns = [str(col).strip() for col in df.columns]
     
-    # Mapeo optimizado de columnas
+    # Mapeo de columnas
     mapeo_columnas = {}
     columnas_requeridas = ['Ejecutivo', 'Telefono', 'FechaCreada', 'Sede', 'Programa', 'Turno', 
                           'Codigo', 'Canal', 'Intervalo', 'Medio', 'Contacto', 'Interesado', 
@@ -288,8 +254,9 @@ def insert_to_temp_table(cursor, df, rango_filas):
                 mapeo_columnas[col_requerida] = col_real
                 break
     
-    registros_insertados = 0
-    batch_data = []
+    logging.info(f"🔍 Columnas mapeadas: {len(mapeo_columnas)}/{len(columnas_requeridas)}")
+    
+    registros_actualizados = 0
     
     for index, row in df.iterrows():
         current_id = start_id + index
@@ -298,14 +265,13 @@ def insert_to_temp_table(cursor, df, rango_filas):
             break
         
         try:
-            # Obtener valores usando mapeo
-            valores = [current_id]  # ID primero
-            
+            # Obtener valores
+            valores = []
             for col_requerida in columnas_requeridas:
                 col_real = mapeo_columnas.get(col_requerida, col_requerida)
                 valor = row.get(col_real, '')
                 
-                # Manejo optimizado de fechas
+                # Manejar fechas
                 if col_requerida == 'FechaCreada' and pd.notna(valor):
                     try:
                         if isinstance(valor, str):
@@ -321,68 +287,32 @@ def insert_to_temp_table(cursor, df, rango_filas):
                 
                 valores.append(valor)
             
-            batch_data.append(valores)
-            registros_insertados += 1
+            valores.append(current_id)
             
-            # OPTIMIZACIÓN: Inserción por lotes cada 100 registros
-            if len(batch_data) >= 100:
-                insert_batch(cursor, batch_data)
-                batch_data = []
-                
+            # Actualizar registro
+            cursor.execute("""
+                UPDATE vendedoras_data SET
+                    Ejecutivo = ?, Telefono = ?, FechaCreada = ?, Sede = ?,
+                    Programa = ?, Turno = ?, Codigo = ?, Canal = ?, Intervalo = ?,
+                    Medio = ?, Contacto = ?, Interesado = ?, Estado = ?,
+                    Objecion = ?, Observacion = ?
+                WHERE ID = ?
+            """, *valores)
+            
+            registros_actualizados += 1
+            
+            # Log cada 100 registros
+            if registros_actualizados % 100 == 0:
+                logging.info(f"📊 Progreso {current_id}: {registros_actualizados} registros")
+            
         except Exception as e:
-            logging.warning(f"⚠️ Error procesando fila {index}: {str(e)}")
+            logging.warning(f"⚠️ Error actualizando ID {current_id}: {str(e)}")
             continue
     
-    # Insertar lote final
-    if batch_data:
-        insert_batch(cursor, batch_data)
-    
-    return registros_insertados
-
-def insert_batch(cursor, batch_data):
-    """Inserción por lotes optimizada"""
-    try:
-        placeholders = ','.join(['?'] * 16)  # 16 columnas
-        sql = f"INSERT INTO #TempVendedorasData VALUES ({placeholders})"
-        cursor.executemany(sql, batch_data)
-    except Exception as e:
-        logging.error(f"❌ Error en inserción por lote: {str(e)}")
-
-def actualizacion_masiva(cursor):
-    """Actualización masiva desde tabla temporal"""
-    try:
-        # OPTIMIZACIÓN: Single UPDATE con JOIN
-        cursor.execute("""
-            UPDATE v 
-            SET 
-                v.Ejecutivo = t.Ejecutivo,
-                v.Telefono = t.Telefono,
-                v.FechaCreada = t.FechaCreada,
-                v.Sede = t.Sede,
-                v.Programa = t.Programa,
-                v.Turno = t.Turno,
-                v.Codigo = t.Codigo,
-                v.Canal = t.Canal,
-                v.Intervalo = t.Intervalo,
-                v.Medio = t.Medio,
-                v.Contacto = t.Contacto,
-                v.Interesado = t.Interesado,
-                v.Estado = t.Estado,
-                v.Objecion = t.Objecion,
-                v.Observacion = t.Observacion
-            FROM vendedoras_data v
-            INNER JOIN #TempVendedorasData t ON v.ID = t.ID
-        """)
-        
-        filas_afectadas = cursor.rowcount
-        logging.info(f"📊 Actualización masiva completada: {filas_afectadas} filas afectadas")
-        
-    except Exception as e:
-        logging.error(f"❌ Error en actualización masiva: {str(e)}")
-        raise
+    return registros_actualizados
 
 def connect_sql_with_retry(connection_string, max_retries=3):
-    """Conectar a SQL con reintentos optimizado"""
+    """Conectar a SQL con reintentos"""
     for attempt in range(max_retries):
         try:
             conn = pyodbc.connect(connection_string)
@@ -390,7 +320,7 @@ def connect_sql_with_retry(connection_string, max_retries=3):
             return conn
         except pyodbc.OperationalError as e:
             if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5  # ⬅️ Reducido de 10 a 5 segundos
+                wait_time = (attempt + 1) * 5
                 logging.warning(f"⚠️ Intento {attempt + 1} fallado, reintentando en {wait_time}s: {str(e)}")
                 time.sleep(wait_time)
             else:
@@ -403,7 +333,7 @@ if __name__ == "__main__":
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler('sync_sharepoint.log')
+            logging.FileHandler('sharepoint_sync.log', encoding='utf-8')
         ]
     )
     
@@ -411,4 +341,4 @@ if __name__ == "__main__":
     sync_sharepoint_to_sql()
     end_time = time.time()
     
-    logging.info(f"⏱️ Tiempo total de ejecución: {end_time - start_time:.2f} segundos")
+    logging.info(f"⏱️ Tiempo total: {end_time - start_time:.2f} segundos")
