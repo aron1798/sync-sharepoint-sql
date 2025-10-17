@@ -47,17 +47,17 @@ def sync_sharepoint_to_sql():
         },
     ]
     
-    # Cadena de conexión Azure SQL
-    connection_string = f"""
-    Driver={{ODBC Driver 17 for SQL Server}};
-    Server={SQL_SERVER};
-    Database={SQL_DATABASE};
-    Uid={SQL_USERNAME};
-    Pwd={SQL_PASSWORD};
-    Encrypt=yes;
-    TrustServerCertificate=no;
-    Connection Timeout=60;
-    """
+    # Cadena de conexión Azure SQL - USAR DRIVER 18
+connection_string = f"""
+Driver={{ODBC Driver 18 for SQL Server}};
+Server={SQL_SERVER};
+Database={SQL_DATABASE};
+Uid={SQL_USERNAME};
+Pwd={SQL_PASSWORD};
+Encrypt=yes;
+TrustServerCertificate=no;
+Connection Timeout=60;
+"""
     
     # Configurar Selenium
     driver = None
