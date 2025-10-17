@@ -33,8 +33,9 @@ jobs:
         
     - name: 🚀 Ejecutar actualización
       env:
-        SHAREPOINT_USERNAME: ${{ secrets.SHAREPOINT_USERNAME }}
-        SHAREPOINT_PASSWORD: ${{ secrets.SHAREPOINT_PASSWORD }}
+        SHAREPOINT_CLIENT_ID: ${{ secrets.SHAREPOINT_CLIENT_ID }}
+        SHAREPOINT_CLIENT_SECRET: ${{ secrets.SHAREPOINT_CLIENT_SECRET }}
+        SHAREPOINT_TENANT_ID: ${{ secrets.SHAREPOINT_TENANT_ID }}
         SQL_SERVER: ${{ secrets.SQL_SERVER }}
         SQL_DATABASE: ${{ secrets.SQL_DATABASE }}
         SQL_USERNAME: ${{ secrets.SQL_USERNAME }}
