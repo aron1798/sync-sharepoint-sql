@@ -5,14 +5,16 @@ from io import BytesIO
 import os
 import logging
 import time
-from requests_ntlm import HttpNtlmAuth
+from msal import ConfidentialClientApplication, PublicClientApplication
 
 def sync_sharepoint_to_sql():
     logging.info("🚀 Iniciando ACTUALIZACIÓN SharePoint -> Azure SQL")
     
-    # ===== CONFIGURACIÓN =====
-    SHAREPOINT_USERNAME = os.environ['SHAREPOINT_USERNAME']
-    SHAREPOINT_PASSWORD = os.environ['SHAREPOINT_PASSWORD']
+    # ===== CONFIGURACIÓN APP REGISTRATION =====
+    CLIENT_ID = os.environ['SHAREPOINT_CLIENT_ID']
+    CLIENT_SECRET = os.environ['SHAREPOINT_CLIENT_SECRET']
+    TENANT_ID = os.environ['SHAREPOINT_TENANT_ID']
+    
     SQL_SERVER = os.environ['SQL_SERVER']
     SQL_DATABASE = os.environ['SQL_DATABASE']
     SQL_USERNAME = os.environ['SQL_USERNAME']
@@ -21,21 +23,20 @@ def sync_sharepoint_to_sql():
     # ===== CONFIGURACIÓN POR VENDEDORA =====
     VENDEDORAS_CONFIG = [
         {
-            "path": "/sites/ASESORASCOMERCIALES/Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Alonso Huaman.xlsx",
+            "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Alonso Huaman.xlsx",
             "table_name": "Base_Alonso",
             "rango_filas": "1:10000"
         },
         {
-            "path": "/sites/ASESORASCOMERCIALES/Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
+            "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
             "table_name": "Base_Diana",
-            "rango_filas": "1:10000"
+            "rango_filas": "10001:20000"
         },
         {
-            "path": "/sites/ASESORASCOMERCIALES/Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx",
+            "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx",
             "table_name": "Base_Gerson",
-            "rango_filas": "1:10000"
+            "rango_filas": "20001:30000"
         },
-        # ... AGREGA LAS 10 VENDEDORAS
     ]
     
     # Cadena de conexión Azure SQL
@@ -51,20 +52,25 @@ def sync_sharepoint_to_sql():
     """
     
     try:
-        # Conectar a Azure SQL con reintentos
+        # Conectar a Azure SQL
         conn = connect_sql_with_retry(connection_string)
         cursor = conn.cursor()
+        
+        # Obtener token de acceso
+        access_token = get_sharepoint_access_token(CLIENT_ID, CLIENT_SECRET, TENANT_ID)
+        if not access_token:
+            logging.error("💥 No se pudo obtener token de acceso")
+            return
         
         # Procesar cada vendedora
         for config in VENDEDORAS_CONFIG:
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # DESCARGAR CON REST API + NTLM (SOLUCIÓN CORREGIDA)
-                file_content = download_sharepoint_file_rest_ntlm(
+                # DESCARGAR CON GRAPH API
+                file_content = download_sharepoint_file_graph(
                     config['path'], 
-                    SHAREPOINT_USERNAME, 
-                    SHAREPOINT_PASSWORD
+                    access_token
                 )
                 
                 if file_content is None:
@@ -75,10 +81,7 @@ def sync_sharepoint_to_sql():
                 df = find_table_in_excel(file_content, config['table_name'])
                 
                 if df is not None and not df.empty:
-                    # Limitar a 10,000 filas máximo
                     df = df.head(10000)
-                    
-                    # ACTUALIZAR Azure SQL
                     actualizar_filas_azure(cursor, df, config['rango_filas'])
                 else:
                     logging.error(f"❌ No se encontró tabla válida: {config['table_name']}")
@@ -87,7 +90,6 @@ def sync_sharepoint_to_sql():
                 logging.error(f"❌ Error procesando {config['table_name']}: {str(e)}")
                 continue
         
-        # Confirmar todos los cambios
         conn.commit()
         conn.close()
         logging.info("🎉 ACTUALIZACIÓN COMPLETADA - 100,000 filas actualizadas")
@@ -96,6 +98,63 @@ def sync_sharepoint_to_sql():
         logging.error(f"💥 Error general: {str(e)}")
         raise e
 
+def get_sharepoint_access_token(client_id, client_secret, tenant_id):
+    """Obtener access token usando App Registration"""
+    try:
+        authority = f"https://login.microsoftonline.com/{tenant_id}"
+        scope = ["https://graph.microsoft.com/.default"]
+        
+        app = ConfidentialClientApplication(
+            client_id=client_id,
+            client_credential=client_secret,
+            authority=authority
+        )
+        
+        result = app.acquire_token_for_client(scopes=scope)
+        
+        if "access_token" in result:
+            logging.info("✅ Token de acceso obtenido exitosamente")
+            return result["access_token"]
+        else:
+            logging.error(f"❌ Error obteniendo token: {result.get('error_description', 'Unknown error')}")
+            return None
+            
+    except Exception as e:
+        logging.error(f"❌ Error en autenticación: {str(e)}")
+        return None
+
+def download_sharepoint_file_graph(file_path, access_token):
+    """Descargar archivo usando Microsoft Graph API"""
+    try:
+        site_id = "escuelarefrigeracion.sharepoint.com,sites,ASESORASCOMERCIALES"
+        
+        # Codificar el path para URL
+        encoded_path = file_path.replace(" ", "%20")
+        
+        # URL de Graph API para descargar archivo
+        graph_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{encoded_path}:/content"
+        
+        logging.info(f"📥 Descargando via Graph API: {file_path}")
+        
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'User-Agent': 'SyncSharePointToSQL/1.0'
+        }
+        
+        response = requests.get(graph_url, headers=headers, timeout=60)
+        
+        if response.status_code == 200:
+            logging.info(f"✅ Descarga Graph API exitosa: {len(response.content)} bytes")
+            return BytesIO(response.content)
+        else:
+            logging.error(f"❌ Error Graph API {response.status_code}: {response.text}")
+            return None
+            
+    except Exception as e:
+        logging.error(f"❌ Error descarga Graph API: {str(e)}")
+        return None
+
+# ... (las funciones connect_sql_with_retry, find_table_in_excel, actualizar_filas_azure se mantienen igual)
 def connect_sql_with_retry(connection_string, max_retries=3):
     """Conectar a SQL con reintentos"""
     for attempt in range(max_retries):
@@ -111,46 +170,6 @@ def connect_sql_with_retry(connection_string, max_retries=3):
             else:
                 logging.error(f"💥 Todos los intentos fallaron: {str(e)}")
                 raise e
-
-def download_sharepoint_file_rest_ntlm(file_path, username, password):
-    """Descargar archivo usando SharePoint REST API + NTLM"""
-    try:
-        site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
-        
-        # Construir URL relativa del archivo
-        file_relative_url = f"/sites/ASESORASCOMERCIALES/{file_path}"
-        
-        # Codificar para URL
-        encoded_url = requests.utils.quote(file_relative_url)
-        
-        # URL para descargar archivo
-        download_url = f"{site_url}/_api/web/GetFileByServerRelativeUrl('{encoded_url}')/$value"
-        
-        logging.info(f"🔐 Autenticando con NTLM...")
-        logging.info(f"📥 Descargando: {file_path}")
-        
-        # Configurar sesión con autenticación NTLM
-        session = requests.Session()
-        session.auth = HttpNtlmAuth(username, password)
-        
-        headers = {
-            'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        # Descargar archivo
-        response = session.get(download_url, headers=headers, timeout=60)
-        
-        if response.status_code == 200:
-            logging.info(f"✅ Descarga exitosa: {len(response.content)} bytes")
-            return BytesIO(response.content)
-        else:
-            logging.error(f"❌ Error HTTP {response.status_code}: {response.text}")
-            return None
-            
-    except Exception as e:
-        logging.error(f"❌ Error descargando archivo: {str(e)}")
-        return None
 
 def find_table_in_excel(file_content, table_name):
     """Buscar tabla específica en el Excel"""
