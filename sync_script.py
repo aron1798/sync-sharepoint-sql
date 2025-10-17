@@ -7,12 +7,13 @@ import logging
 import time
 import urllib3
 import random
+from datetime import datetime
 
 # Deshabilitar warnings de SSL (temporal para pruebas)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def sync_sharepoint_to_sql():
-    logging.info("🚀 Iniciando ACTUALIZACIÓN SharePoint -> Azure SQL")
+    logging.info("🚀 Iniciando ACTUALIZACIÓN OPTIMIZADA SharePoint -> Azure SQL")
     
     # ===== CONFIGURACIÓN =====
     SHAREPOINT_USERNAME = os.environ['SHAREPOINT_USERNAME']
@@ -31,7 +32,7 @@ def sync_sharepoint_to_sql():
         },
         {
             "path": "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
-            "table_name": "Base_Diana",
+            "table_name": "Base_Diana", 
             "rango_filas": "10001:20000"
         },
         {
@@ -59,27 +60,60 @@ def sync_sharepoint_to_sql():
         conn = connect_sql_with_retry(connection_string)
         cursor = conn.cursor()
         
+        # OPTIMIZACIÓN: Crear tabla temporal para bulk insert
+        cursor.execute("""
+            IF OBJECT_ID('tempdb..#TempVendedorasData') IS NOT NULL
+                DROP TABLE #TempVendedorasData
+            
+            CREATE TABLE #TempVendedorasData (
+                ID INT,
+                Ejecutivo NVARCHAR(100),
+                Telefono NVARCHAR(50),
+                FechaCreada DATETIME,
+                Sede NVARCHAR(100),
+                Programa NVARCHAR(100),
+                Turno NVARCHAR(50),
+                Codigo NVARCHAR(50),
+                Canal NVARCHAR(100),
+                Intervalo NVARCHAR(50),
+                Medio NVARCHAR(100),
+                Contacto NVARCHAR(100),
+                Interesado NVARCHAR(100),
+                Estado NVARCHAR(100),
+                Objecion NVARCHAR(500),
+                Observacion NVARCHAR(1000)
+            )
+        """)
+        
         # Procesar cada vendedora
+        total_registros = 0
         for config in VENDEDORAS_CONFIG:
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # SOLO USAR LINKS PÚBLICOS (método más confiable)
-                file_content = download_sharepoint_file_public_advanced(config['path'])
+                # SOLUCIÓN HÍBRIDA: Links públicos + autenticación
+                file_content = download_sharepoint_file_public_with_auth(
+                    config['path'], 
+                    SHAREPOINT_USERNAME, 
+                    SHAREPOINT_PASSWORD
+                )
                 
                 if file_content is None:
                     logging.error(f"❌ No se pudo descargar: {config['path']}")
                     continue
                 
                 # Buscar la tabla en el Excel
-                df = find_table_in_excel(file_content, config['table_name'])
+                df = find_table_in_excel_optimized(file_content, config['table_name'])
                 
                 if df is not None and not df.empty:
                     # Limitar a 10,000 filas máximo
                     df = df.head(10000)
                     
-                    # ACTUALIZAR Azure SQL
-                    actualizar_filas_azure(cursor, df, config['rango_filas'])
+                    # OPTIMIZACIÓN: Insertar en tabla temporal
+                    registros_procesados = insert_to_temp_table(cursor, df, config['rango_filas'])
+                    total_registros += registros_procesados
+                    
+                    logging.info(f"✅ {config['table_name']}: {registros_procesados} registros preparados")
                 else:
                     logging.error(f"❌ No se encontró tabla válida: {config['table_name']}")
                 
@@ -87,35 +121,24 @@ def sync_sharepoint_to_sql():
                 logging.error(f"❌ Error procesando {config['table_name']}: {str(e)}")
                 continue
         
+        # OPTIMIZACIÓN: Actualización masiva desde tabla temporal
+        if total_registros > 0:
+            logging.info(f"🔄 Realizando actualización masiva de {total_registros} registros...")
+            actualizacion_masiva(cursor)
+        
         # Confirmar todos los cambios
         conn.commit()
         conn.close()
-        logging.info("🎉 ACTUALIZACIÓN COMPLETADA - 100,000 filas actualizadas")
+        logging.info(f"🎉 ACTUALIZACIÓN COMPLETADA - {total_registros} filas actualizadas")
             
     except Exception as e:
         logging.error(f"💥 Error general: {str(e)}")
         raise e
 
-def connect_sql_with_retry(connection_string, max_retries=3):
-    """Conectar a SQL con reintentos"""
-    for attempt in range(max_retries):
-        try:
-            conn = pyodbc.connect(connection_string)
-            logging.info(f"✅ Conexión SQL exitosa (intento {attempt + 1})")
-            return conn
-        except pyodbc.OperationalError as e:
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 10
-                logging.warning(f"⚠️ Intento {attempt + 1} fallado, reintentando en {wait_time}s: {str(e)}")
-                time.sleep(wait_time)
-            else:
-                logging.error(f"💥 Todos los intentos fallaron: {str(e)}")
-                raise e
-
-def download_sharepoint_file_public_advanced(file_path):
-    """SOLUCIÓN AVANZADA: Simular navegador real completamente"""
+def download_sharepoint_file_public_with_auth(file_path, username, password):
+    """SOLUCIÓN HÍBRIDA OPTIMIZADA: Links públicos + autenticación"""
     
-    # LINKS PÚBLICOS ÚNICOS - TUS LINKS REALES
+    # LINKS PÚBLICOS ÚNICOS
     public_links = {
         "Base Alonso Huaman.xlsx": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EaIlXhIcpYBFkaxzXu7aQIQBAu_zaldlNLgtz7y6bOMyCA?e=yVU2iw",
         "Base Diana Chavez.xlsx": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EeRBRnXXABpPhWkYk87UcjoB-VltTBFz6MRSQ-VEbucP8Q?e=bvUv7V",
@@ -126,167 +149,105 @@ def download_sharepoint_file_public_advanced(file_path):
     
     if filename in public_links:
         try:
-            logging.info(f"🔗 Descargando via LINK PÚBLICO AVANZADO: {filename}")
+            logging.info(f"🔗 Descargando link público CON AUTENTICACIÓN: {filename}")
             
             session = requests.Session()
+            session.auth = (username, password)  # ⬅️ CLAVE: Agregar autenticación
             
-            # AGENTES DE USUARIO REALES (rotación)
-            user_agents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36 Edg/117.0.2045.47',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0'
-            ]
-            
-            # HEADERS COMPLETOS simulando navegador real
+            # Headers optimizados
             headers = {
-                'User-Agent': random.choice(user_agents),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'DNT': '1',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Cache-Control': 'max-age=0',
-                'sec-ch-ua': '"Google Chrome";v="119", "Chromium";v="119", "Not?A_Brand";v="24"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"Windows"'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8'
             }
             
-            # Pequeña pausa aleatoria (como humano)
-            time.sleep(random.uniform(1, 3))
-            
-            # PRIMERO: Hacer una request de "navegación" como haría un humano
-            logging.info("🌐 Simulando navegación inicial...")
-            preview_response = session.get(
-                public_links[filename], 
-                headers=headers, 
-                timeout=30, 
-                verify=False,
-                allow_redirects=True
-            )
-            
-            # Pequeña pausa entre requests
-            time.sleep(random.uniform(0.5, 2))
-            
-            # SEGUNDO: Descargar el archivo con headers específicos para descarga
-            download_headers = headers.copy()
-            download_headers.update({
-                'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, */*',
-                'Referer': public_links[filename]
-            })
-            
-            logging.info("📥 Realizando descarga...")
+            # OPTIMIZACIÓN: Timeout más agresivo y seguimiento de redirecciones
             response = session.get(
                 public_links[filename], 
-                headers=download_headers, 
-                timeout=60, 
+                headers=headers, 
+                timeout=30,  # ⬅️ Reducido de 60 a 30 segundos
                 verify=False,
-                allow_redirects=True,
-                stream=True
+                allow_redirects=True  # ⬅️ IMPORTANTE: Seguir redirecciones
             )
             
-            logging.info(f"📊 Response: HTTP {response.status_code}, Size: {len(response.content) if response.content else 0} bytes")
+            logging.info(f"📊 Response final: HTTP {response.status_code}, Size: {len(response.content)} bytes")
             
             if response.status_code == 200:
                 content = response.content
                 
-                # ANÁLISIS DETALLADO del contenido
+                # Verificación robusta de contenido Excel
                 if len(content) > 1000:
-                    # Verificar si es HTML (error)
-                    try:
-                        content_start = content[:1000].decode('utf-8', errors='ignore')
-                        if any(keyword in content_start.lower() for keyword in ['<!doctype', '<html', 'login', 'sign in', 'microsoft', 'error']):
-                            logging.error("❌ SharePoint devolvió página HTML/Login")
-                            logging.info(f"📄 Inicio del contenido: {content_start[:300]}")
-                            return None
-                    except:
-                        pass
+                    content_start = content[:500].decode('utf-8', errors='ignore')
                     
-                    # Verificar si es Excel válido
-                    if content[:4] == b'PK\x03\x04':  # Firma ZIP de Office
+                    # Si es HTML, falló la autenticación
+                    if any(keyword in content_start.lower() for keyword in ['<!doctype', '<html', 'login', 'redirect', 'microsoft']):
+                        logging.error("❌ Autenticación falló - SharePoint devolvió página HTML")
+                        logging.debug(f"Contenido inicial: {content_start[:200]}")
+                        return None
+                    
+                    # Verificar firma de archivo Excel
+                    if (content[:4] == b'PK\x03\x04' or  # Firma ZIP de Office
+                        b'[Content_Types]' in content[:2000] or 
+                        b'xl/' in content[:1000]):
                         logging.info(f"✅ ÉXITO: Excel válido detectado - {len(content)} bytes")
                         return BytesIO(content)
-                    elif b'[Content_Types]' in content[:2000] or b'xl/' in content[:1000]:
-                        logging.info(f"✅ ÉXITO: Contenido Excel detectado - {len(content)} bytes")
-                        return BytesIO(content)
                     else:
-                        # Intentar de todos modos (puede ser Excel con encoding diferente)
+                        # Intentar procesar de todos modos
                         logging.warning(f"⚠️ Firma Excel no estándar, intentando procesar...")
-                        logging.info(f"🔍 Primeros bytes (hex): {content[:8].hex()}")
                         return BytesIO(content)
                 else:
                     logging.error(f"❌ Archivo demasiado pequeño: {len(content)} bytes")
                     return None
             else:
                 logging.error(f"❌ Error HTTP {response.status_code}")
-                # Intentar analizar el error
-                if response.content:
-                    error_content = response.content[:500].decode('utf-8', errors='ignore')
-                    logging.info(f"📄 Contenido error: {error_content}")
                 return None
                 
+        except requests.exceptions.Timeout:
+            logging.error("❌ Timeout en descarga de SharePoint")
+            return None
         except Exception as e:
-            logging.error(f"❌ Error en descarga avanzada: {str(e)}")
+            logging.error(f"❌ Error en descarga con autenticación: {str(e)}")
             return None
     else:
         logging.warning(f"⚠️ No hay link público configurado para: {filename}")
         return None
 
-def find_table_in_excel(file_content, table_name):
-    """Buscar tabla específica en el Excel con manejo robusto"""
+def find_table_in_excel_optimized(file_content, table_name):
+    """Búsqueda optimizada de tabla en Excel"""
     try:
-        # Intentar con diferentes engines y estrategias
-        engines = ['openpyxl', 'xlrd']
-        
-        for engine in engines:
+        # OPTIMIZACIÓN: Probar solo openpyxl (más rápido para .xlsx)
+        try:
+            excel_file = pd.ExcelFile(file_content, engine='openpyxl')
+            
+            # Estrategia 1: Buscar en primera hoja (caso más común)
             try:
-                logging.info(f"🔧 Probando engine: {engine}")
-                excel_file = pd.ExcelFile(file_content, engine=engine)
-                
-                # Estrategia 1: Buscar por nombre de tabla en celdas
-                for sheet_name in excel_file.sheet_names:
-                    try:
-                        df_temp = pd.read_excel(file_content, sheet_name=sheet_name, header=None, engine=engine)
-                        
-                        for row_idx, row in df_temp.iterrows():
-                            for col_idx, value in row.items():
-                                if pd.notna(value) and table_name.lower() in str(value).lower():
-                                    logging.info(f"✅ Tabla '{table_name}' encontrada en hoja: {sheet_name}, fila: {row_idx+1}")
-                                    df = pd.read_excel(file_content, sheet_name=sheet_name, header=row_idx, engine=engine)
-                                    return df
-                    except Exception as e:
-                        logging.warning(f"⚠️ Error en hoja {sheet_name}: {str(e)}")
-                        continue
-                
-                # Estrategia 2: Usar primera hoja con datos
-                try:
-                    df = pd.read_excel(file_content, sheet_name=0, engine=engine)
-                    if not df.empty:
-                        logging.info(f"✅ Usando primera hoja con datos (engine: {engine})")
-                        return df
-                except Exception as e:
-                    logging.warning(f"⚠️ Error primera hoja: {str(e)}")
-                    pass
-                    
-                # Estrategia 3: Probar todas las hojas
-                for sheet_name in excel_file.sheet_names:
-                    try:
-                        df = pd.read_excel(file_content, sheet_name=sheet_name, engine=engine)
-                        if not df.empty and len(df.columns) > 1:  # Debe tener varias columnas
-                            logging.info(f"✅ Datos encontrados en hoja: {sheet_name} (engine: {engine})")
-                            return df
-                    except Exception as e:
-                        logging.warning(f"⚠️ Error hoja {sheet_name}: {str(e)}")
-                        continue
-                        
+                df = pd.read_excel(file_content, sheet_name=0, engine='openpyxl')
+                if not df.empty and len(df.columns) > 1:
+                    logging.info("✅ Datos encontrados en primera hoja")
+                    return clean_dataframe(df)
             except Exception as e:
-                logging.warning(f"⚠️ Engine {engine} falló: {str(e)}")
-                continue
+                logging.warning(f"⚠️ Error en primera hoja: {str(e)}")
+                pass
+            
+            # Estrategia 2: Buscar en todas las hojas
+            for sheet_name in excel_file.sheet_names:
+                try:
+                    df = pd.read_excel(file_content, sheet_name=sheet_name, engine='openpyxl')
+                    if not df.empty and len(df.columns) > 1:
+                        logging.info(f"✅ Datos encontrados en hoja: {sheet_name}")
+                        return clean_dataframe(df)
+                except Exception as e:
+                    logging.warning(f"⚠️ Error en hoja {sheet_name}: {str(e)}")
+                    continue
+                    
+        except Exception as e:
+            logging.warning(f"⚠️ Openpyxl falló: {str(e)}")
+            # Fallback a xlrd si es necesario
+            try:
+                df = pd.read_excel(file_content, engine='xlrd')
+                return clean_dataframe(df)
+            except:
+                pass
                 
         logging.error("❌ No se pudo leer el archivo con ningún engine")
         return None
@@ -295,15 +256,27 @@ def find_table_in_excel(file_content, table_name):
         logging.error(f"❌ Error buscando tabla: {str(e)}")
         return None
 
-def actualizar_filas_azure(cursor, df, rango_filas):
-    """Actualizar filas específicas en Azure SQL"""
-    # Obtener rango de IDs a actualizar
+def clean_dataframe(df):
+    """Limpieza y normalización del DataFrame"""
+    # Eliminar filas completamente vacías
+    df = df.dropna(how='all')
+    
+    # Normalizar nombres de columnas
+    df.columns = [str(col).strip().replace('\n', ' ').replace('\r', '') for col in df.columns]
+    
+    # Eliminar columnas completamente vacías
+    df = df.dropna(axis=1, how='all')
+    
+    return df
+
+def insert_to_temp_table(cursor, df, rango_filas):
+    """Inserción optimizada en tabla temporal"""
     start_id, end_id = map(int, rango_filas.split(':'))
     
     # Normalizar nombres de columnas
     df.columns = [str(col).strip() for col in df.columns]
     
-    # Mapeo flexible de columnas
+    # Mapeo optimizado de columnas
     mapeo_columnas = {}
     columnas_requeridas = ['Ejecutivo', 'Telefono', 'FechaCreada', 'Sede', 'Programa', 'Turno', 
                           'Codigo', 'Canal', 'Intervalo', 'Medio', 'Contacto', 'Interesado', 
@@ -315,10 +288,9 @@ def actualizar_filas_azure(cursor, df, rango_filas):
                 mapeo_columnas[col_requerida] = col_real
                 break
     
-    logging.info(f"🔍 Mapeo de columnas encontradas: {len(mapeo_columnas)}/{len(columnas_requeridas)}")
+    registros_insertados = 0
+    batch_data = []
     
-    # Actualizar fila por fila
-    registros_actualizados = 0
     for index, row in df.iterrows():
         current_id = start_id + index
         
@@ -327,12 +299,13 @@ def actualizar_filas_azure(cursor, df, rango_filas):
         
         try:
             # Obtener valores usando mapeo
-            valores = []
+            valores = [current_id]  # ID primero
+            
             for col_requerida in columnas_requeridas:
                 col_real = mapeo_columnas.get(col_requerida, col_requerida)
                 valor = row.get(col_real, '')
                 
-                # Manejar fechas
+                # Manejo optimizado de fechas
                 if col_requerida == 'FechaCreada' and pd.notna(valor):
                     try:
                         if isinstance(valor, str):
@@ -343,39 +316,99 @@ def actualizar_filas_azure(cursor, df, rango_filas):
                             valor = None
                     except:
                         valor = None
+                elif pd.isna(valor):
+                    valor = None
                 
                 valores.append(valor)
             
-            valores.append(current_id)
+            batch_data.append(valores)
+            registros_insertados += 1
             
-            cursor.execute("""
-                UPDATE vendedoras_data SET
-                    Ejecutivo = ?,
-                    Telefono = ?,
-                    FechaCreada = ?,
-                    Sede = ?,
-                    Programa = ?,
-                    Turno = ?,
-                    Codigo = ?,
-                    Canal = ?,
-                    Intervalo = ?,
-                    Medio = ?,
-                    Contacto = ?,
-                    Interesado = ?,
-                    Estado = ?,
-                    Objecion = ?,
-                    Observacion = ?
-                WHERE ID = ?
-            """, *valores)
-            
-            registros_actualizados += 1
-            
+            # OPTIMIZACIÓN: Inserción por lotes cada 100 registros
+            if len(batch_data) >= 100:
+                insert_batch(cursor, batch_data)
+                batch_data = []
+                
         except Exception as e:
-            logging.warning(f"⚠️ Error actualizando ID {current_id}: {str(e)}")
+            logging.warning(f"⚠️ Error procesando fila {index}: {str(e)}")
             continue
     
-    logging.info(f"📊 Actualizadas filas {rango_filas}: {registros_actualizados}/{len(df)} registros")
+    # Insertar lote final
+    if batch_data:
+        insert_batch(cursor, batch_data)
+    
+    return registros_insertados
+
+def insert_batch(cursor, batch_data):
+    """Inserción por lotes optimizada"""
+    try:
+        placeholders = ','.join(['?'] * 16)  # 16 columnas
+        sql = f"INSERT INTO #TempVendedorasData VALUES ({placeholders})"
+        cursor.executemany(sql, batch_data)
+    except Exception as e:
+        logging.error(f"❌ Error en inserción por lote: {str(e)}")
+
+def actualizacion_masiva(cursor):
+    """Actualización masiva desde tabla temporal"""
+    try:
+        # OPTIMIZACIÓN: Single UPDATE con JOIN
+        cursor.execute("""
+            UPDATE v 
+            SET 
+                v.Ejecutivo = t.Ejecutivo,
+                v.Telefono = t.Telefono,
+                v.FechaCreada = t.FechaCreada,
+                v.Sede = t.Sede,
+                v.Programa = t.Programa,
+                v.Turno = t.Turno,
+                v.Codigo = t.Codigo,
+                v.Canal = t.Canal,
+                v.Intervalo = t.Intervalo,
+                v.Medio = t.Medio,
+                v.Contacto = t.Contacto,
+                v.Interesado = t.Interesado,
+                v.Estado = t.Estado,
+                v.Objecion = t.Objecion,
+                v.Observacion = t.Observacion
+            FROM vendedoras_data v
+            INNER JOIN #TempVendedorasData t ON v.ID = t.ID
+        """)
+        
+        filas_afectadas = cursor.rowcount
+        logging.info(f"📊 Actualización masiva completada: {filas_afectadas} filas afectadas")
+        
+    except Exception as e:
+        logging.error(f"❌ Error en actualización masiva: {str(e)}")
+        raise
+
+def connect_sql_with_retry(connection_string, max_retries=3):
+    """Conectar a SQL con reintentos optimizado"""
+    for attempt in range(max_retries):
+        try:
+            conn = pyodbc.connect(connection_string)
+            logging.info(f"✅ Conexión SQL exitosa (intento {attempt + 1})")
+            return conn
+        except pyodbc.OperationalError as e:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 5  # ⬅️ Reducido de 10 a 5 segundos
+                logging.warning(f"⚠️ Intento {attempt + 1} fallado, reintentando en {wait_time}s: {str(e)}")
+                time.sleep(wait_time)
+            else:
+                logging.error(f"💥 Todos los intentos fallaron: {str(e)}")
+                raise e
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(
+        level=logging.INFO, 
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('sync_sharepoint.log')
+        ]
+    )
+    
+    start_time = time.time()
     sync_sharepoint_to_sql()
+    end_time = time.time()
+    
+    logging.info(f"⏱️ Tiempo total de ejecución: {end_time - start_time:.2f} segundos")
