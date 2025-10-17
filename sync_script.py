@@ -6,15 +6,21 @@ import os
 import logging
 import time
 import urllib3
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
+import base64
 
 # Deshabilitar warnings de SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 def sync_sharepoint_to_sql():
-    logging.info("🚀 Iniciando SINCRONIZACIÓN CON API OFICIAL SharePoint")
+    logging.info("🚀 Iniciando SINCRONIZACIÓN CON SELENIUM SharePoint")
     
     # ===== CONFIGURACIÓN =====
-    SHAREPOINT_SITE = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
     SHAREPOINT_USERNAME = os.environ['SHAREPOINT_USERNAME']
     SHAREPOINT_PASSWORD = os.environ['SHAREPOINT_PASSWORD']
     SQL_SERVER = os.environ['SQL_SERVER']
@@ -25,17 +31,17 @@ def sync_sharepoint_to_sql():
     # ===== CONFIGURACIÓN VENDEDORAS =====
     VENDEDORAS_CONFIG = [
         {
-            "path": "Shared Documents/2. BASE PROSPECTOS/BASE GENERAL/Base Alonso Huaman.xlsx",
+            "public_link": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EaIlXhIcpYBFkaxzXu7aQIQBAu_zaldlNLgtz7y6bOMyCA?e=yVU2iw",
             "table_name": "Base_Alonso",
             "rango_filas": "1:10000"
         },
         {
-            "path": "Shared Documents/2. BASE PROSPECTOS/BASE GENERAL/Base Diana Chavez.xlsx",
+            "public_link": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EeRBRnXXABpPhWkYk87UcjoB-VltTBFz6MRSQ-VEbucP8Q?e=bvUv7V",
             "table_name": "Base_Diana",
             "rango_filas": "10001:20000"
         },
         {
-            "path": "Shared Documents/2. BASE PROSPECTOS/BASE GENERAL/Base Gerson Falen.xlsx", 
+            "public_link": "https://escuelarefrigeracion.sharepoint.com/:x:/s/ASESORASCOMERCIALES/EQGtk5_fCslJowZlY8g7kTEBLfD29swdE4DK_0nDfBZ7qw?e=36cm8P",
             "table_name": "Base_Gerson",
             "rango_filas": "20001:30000"
         },
@@ -43,7 +49,7 @@ def sync_sharepoint_to_sql():
     
     # Cadena de conexión Azure SQL
     connection_string = f"""
-    Driver={{ODBC Driver 18 for SQL Server}};
+    Driver={{ODBC Driver 17 for SQL Server}};
     Server={SQL_SERVER};
     Database={SQL_DATABASE};
     Uid={SQL_USERNAME};
@@ -53,30 +59,36 @@ def sync_sharepoint_to_sql():
     Connection Timeout=60;
     """
     
+    # Configurar Selenium
+    driver = None
     try:
         # 1. CONECTAR A AZURE SQL
         conn = connect_sql_with_retry(connection_string)
         cursor = conn.cursor()
         
-        # 2. PROCESAR CADA ARCHIVO
+        # 2. INICIAR NAVEGADOR SELENIUM
+        driver = setup_selenium_driver()
+        
+        # 3. INICIAR SESIÓN EN SHAREPOINT
+        if not login_to_sharepoint(driver, SHAREPOINT_USERNAME, SHAREPOINT_PASSWORD):
+            logging.error("💥 No se pudo iniciar sesión en SharePoint")
+            return
+        
+        # 4. PROCESAR CADA ARCHIVO
         total_registros = 0
         for config in VENDEDORAS_CONFIG:
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # DESCARGAR ARCHIVO USANDO MÉTODO DIRECTO
-                file_content = download_sharepoint_direct(
-                    config['path'], 
-                    SHAREPOINT_USERNAME, 
-                    SHAREPOINT_PASSWORD
-                )
+                # DESCARGAR ARCHIVO USANDO SELENIUM
+                file_content = download_with_selenium(driver, config['public_link'], config['table_name'])
                 
                 if file_content:
                     # PROCESAR EXCEL
                     df = process_excel_file(file_content, config['table_name'])
                     
                     if df is not None and not df.empty:
-                        df = df.head(10000)  # Limitar a 10,000 filas
+                        df = df.head(10000)
                         
                         # ACTUALIZAR BASE DE DATOS
                         registros_procesados = update_database(cursor, df, config['rango_filas'])
@@ -85,7 +97,10 @@ def sync_sharepoint_to_sql():
                     else:
                         logging.error(f"❌ No se encontraron datos en: {config['table_name']}")
                 else:
-                    logging.error(f"❌ No se pudo descargar: {config['path']}")
+                    logging.error(f"❌ No se pudo descargar: {config['table_name']}")
+                    
+                # Pequeña pausa entre descargas
+                time.sleep(3)
                     
             except Exception as e:
                 logging.error(f"❌ Error procesando {config['table_name']}: {str(e)}")
@@ -99,115 +114,254 @@ def sync_sharepoint_to_sql():
     except Exception as e:
         logging.error(f"💥 Error general: {str(e)}")
         raise e
+    finally:
+        # Cerrar navegador
+        if driver:
+            driver.quit()
 
-def download_sharepoint_direct(file_path, username, password):
-    """MÉTODO DIRECTO Y SIMPLE para descargar de SharePoint"""
+def setup_selenium_driver():
+    """Configurar ChromeDriver para Selenium"""
     try:
-        logging.info(f"📥 Intentando descargar: {file_path}")
+        chrome_options = Options()
         
-        # Construir URL directa
-        site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
-        file_url = f"{site_url}/_api/web/GetFileByServerRelativeUrl('/sites/ASESORASCOMERCIALES/{file_path}')/$value"
+        # Configuración para entorno headless (sin interfaz gráfica)
+        chrome_options.add_argument('--headless=new')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('--disable-extensions')
+        chrome_options.add_argument('--disable-plugins')
+        chrome_options.add_argument('--disable-images')
+        chrome_options.add_argument('--blink-settings=imagesEnabled=false')
         
-        logging.info(f"🔗 URL: {file_url}")
+        # Configuración para mejor rendimiento
+        chrome_options.add_argument('--disable-javascript')
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-backgrounding-occluded-windows')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
         
-        # Headers para API SharePoint
-        headers = {
-            'Accept': 'application/json;odata=verbose',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        driver = webdriver.Chrome(options=chrome_options)
+        driver.implicitly_wait(15)
         
-        # Hacer la petición con autenticación básica
-        response = requests.get(
-            file_url,
-            auth=(username, password),
-            headers=headers,
-            timeout=30,
-            verify=False
-        )
+        logging.info("✅ Navegador Chrome configurado")
+        return driver
         
-        logging.info(f"📊 Response: HTTP {response.status_code}, Size: {len(response.content)} bytes")
-        
-        if response.status_code == 200:
-            content = response.content
-            
-            # Verificar que sea un Excel válido
-            if len(content) > 1000:
-                # Verificar firma de archivo Excel
-                if (content[:4] == b'PK\x03\x04' or  # Firma ZIP
-                    b'[Content_Types]' in content[:2000] or 
-                    b'xl/' in content[:1000]):
-                    logging.info(f"✅ Excel válido descargado: {len(content)} bytes")
-                    return BytesIO(content)
-                else:
-                    # Verificar si es error HTML
-                    content_preview = content[:500].decode('utf-8', errors='ignore')
-                    if any(keyword in content_preview.lower() for keyword in ['<html', 'error', 'login']):
-                        logging.error(f"❌ SharePoint devolvió error HTML: {content_preview[:200]}")
-                        return None
-                    else:
-                        logging.warning("⚠️ Contenido no reconocido, pero intentando procesar...")
-                        return BytesIO(content)
-            else:
-                logging.error("❌ Archivo demasiado pequeño")
-                return None
-        else:
-            logging.error(f"❌ Error HTTP {response.status_code}")
-            if response.content:
-                error_content = response.content[:500].decode('utf-8', errors='ignore')
-                logging.info(f"📄 Contenido error: {error_content[:200]}")
-            return None
-            
     except Exception as e:
-        logging.error(f"❌ Error en descarga directa: {str(e)}")
+        logging.error(f"❌ Error configurando Selenium: {str(e)}")
+        raise
+
+def login_to_sharepoint(driver, username, password):
+    """Iniciar sesión en SharePoint"""
+    try:
+        logging.info("🔐 Iniciando sesión en SharePoint...")
+        
+        # Ir a página principal de SharePoint
+        login_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
+        driver.get(login_url)
+        
+        time.sleep(5)
+        
+        # Esperar y completar formulario de login
+        try:
+            email_field = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.ID, "i0116"))
+            )
+            email_field.clear()
+            email_field.send_keys(username)
+            logging.info("✅ Email ingresado")
+            
+            next_button = driver.find_element(By.ID, "idSIButton9")
+            next_button.click()
+            logging.info("✅ Click en siguiente")
+        except Exception as e:
+            logging.error(f"❌ Error en campo email: {str(e)}")
+            return False
+        
+        time.sleep(3)
+        
+        # Esperar campo de password
+        try:
+            password_field = WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.ID, "i0118"))
+            )
+            password_field.clear()
+            password_field.send_keys(password)
+            logging.info("✅ Password ingresado")
+            
+            signin_button = driver.find_element(By.ID, "idSIButton9")
+            signin_button.click()
+            logging.info("✅ Click en iniciar sesión")
+        except Exception as e:
+            logging.error(f"❌ Error en campo password: {str(e)}")
+            return False
+        
+        time.sleep(5)
+        
+        # Esperar posible pantalla de "Mantener sesión iniciada"
+        try:
+            stay_signed_in = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.ID, "idSIButton9"))
+            )
+            stay_signed_in.click()
+            logging.info("✅ Click en mantener sesión")
+            time.sleep(3)
+        except:
+            logging.info("ℹ️ No apareció pantalla de mantener sesión")
+            pass
+        
+        # Verificar que el login fue exitoso - esperar a que cargue algún elemento de SharePoint
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            # Verificar que no estamos en página de login
+            current_url = driver.current_url
+            if "login.microsoftonline.com" not in current_url and "login.live.com" not in current_url:
+                logging.info("✅ Sesión iniciada exitosamente en SharePoint")
+                return True
+            else:
+                logging.error("❌ Still on login page after authentication")
+                return False
+                
+        except Exception as e:
+            logging.error(f"❌ Error verificando login: {str(e)}")
+            return False
+        
+    except Exception as e:
+        logging.error(f"❌ Error en login: {str(e)}")
+        return False
+
+def download_with_selenium(driver, public_link, table_name):
+    """Descargar archivo usando Selenium - Método directo via URL"""
+    try:
+        logging.info(f"📥 Descargando: {table_name}")
+        
+        # Método DIRECTO: Construir URL de descarga directa
+        # Extraer el ID único del link público
+        if "?e=" in public_link:
+            base_url = public_link.split("?e=")[0]
+            
+        # Construir URL de descarga directa
+        download_url = public_link.replace("/:x:", "/:x:/t:")
+        download_url += "&download=1"
+        
+        logging.info(f"🔗 URL de descarga: {download_url}")
+        
+        # Navegar a la URL de descarga
+        driver.get(download_url)
+        time.sleep(8)  # Esperar a que procese la descarga
+        
+        # Verificar si se descargó contenido
+        current_url = driver.current_url
+        page_source = driver.page_source
+        
+        # Si la página contiene datos de Excel, intentar extraerlos
+        if "PK" in page_source[:1000] or "xl/" in page_source:
+            logging.info("✅ Contenido Excel detectado en página")
+            # Extraer el contenido binario
+            script = """
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', arguments[0], false);
+            xhr.responseType = 'arraybuffer';
+            xhr.send();
+            
+            if (xhr.status === 200) {
+                var arrayBuffer = xhr.response;
+                var base64 = btoa(String.fromCharCode.apply(null, new Uint8Array(arrayBuffer)));
+                return base64;
+            }
+            return null;
+            """
+            
+            try:
+                file_base64 = driver.execute_script(script, download_url)
+                if file_base64:
+                    file_content = base64.b64decode(file_base64)
+                    if len(file_content) > 1000:
+                        logging.info(f"✅ Archivo descargado: {len(file_content)} bytes")
+                        return BytesIO(file_content)
+            except:
+                pass
+        
+        # Método alternativo: usar requests con cookies de Selenium
+        try:
+            cookies = driver.get_cookies()
+            session = requests.Session()
+            
+            for cookie in cookies:
+                session.cookies.set(cookie['name'], cookie['value'])
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = session.get(download_url, headers=headers, timeout=30, verify=False)
+            
+            if response.status_code == 200 and len(response.content) > 1000:
+                # Verificar que sea Excel
+                if response.content[:4] == b'PK\x03\x04' or b'xl/' in response.content[:1000]:
+                    logging.info(f"✅ Archivo descargado via requests: {len(response.content)} bytes")
+                    return BytesIO(response.content)
+                else:
+                    # Verificar si es HTML de error
+                    content_preview = response.content[:500].decode('utf-8', errors='ignore')
+                    if '<html' in content_preview.lower() or 'error' in content_preview.lower():
+                        logging.error(f"❌ SharePoint devolvió error HTML")
+                    else:
+                        logging.warning("⚠️ Contenido no reconocido, intentando procesar...")
+                        return BytesIO(response.content)
+            else:
+                logging.error(f"❌ Error en descarga: HTTP {response.status_code}, tamaño: {len(response.content)}")
+                
+        except Exception as e:
+            logging.error(f"❌ Error en método alternativo: {str(e)}")
+        
+        return None
+        
+    except Exception as e:
+        logging.error(f"❌ Error en descarga Selenium: {str(e)}")
         return None
 
 def process_excel_file(file_content, table_name):
-    """Procesar archivo Excel de forma robusta"""
+    """Procesar archivo Excel"""
     try:
-        # Reiniciar el cursor del archivo
         file_content.seek(0)
         
-        # Intentar con diferentes engines
-        engines = ['openpyxl', 'xlrd']
+        # Verificar que el contenido sea válido
+        content_preview = file_content.read(100)
+        file_content.seek(0)
         
-        for engine in engines:
+        if b'PK' not in content_preview and b'xl' not in content_preview:
+            logging.warning("⚠️ El contenido no parece ser un archivo Excel válido")
+        
+        for engine in ['openpyxl', 'xlrd']:
             try:
-                # Leer primera hoja
                 df = pd.read_excel(file_content, engine=engine, sheet_name=0)
-                
                 if not df.empty and len(df.columns) > 1:
                     logging.info(f"✅ Excel procesado con {engine}: {len(df)} filas, {len(df.columns)} columnas")
-                    
-                    # Limpiar datos
-                    df = clean_dataframe(df)
-                    return df
-                    
+                    return clean_dataframe(df)
             except Exception as e:
                 logging.warning(f"⚠️ Engine {engine} falló: {str(e)}")
-                file_content.seek(0)  # Reiniciar para siguiente engine
+                file_content.seek(0)
                 continue
         
-        # Si ambos engines fallan, intentar método de fuerza bruta
-        logging.warning("🔄 Intentando método de fuerza bruta...")
+        # Intentar con todas las hojas
         file_content.seek(0)
-        
-        for sheet_name in [0, 1, 2]:  # Probar primeras 3 hojas
-            for engine in engines:
-                try:
-                    df = pd.read_excel(file_content, engine=engine, sheet_name=sheet_name, header=None)
-                    if not df.empty and len(df.columns) > 3:  # Debe tener al menos 4 columnas
-                        # Buscar fila de encabezados
-                        for header_row in range(min(5, len(df))):
-                            try:
-                                df_with_header = pd.read_excel(file_content, engine=engine, sheet_name=sheet_name, header=header_row)
-                                if not df_with_header.empty:
-                                    logging.info(f"✅ Datos encontrados en hoja {sheet_name}, fila header {header_row}")
-                                    return clean_dataframe(df_with_header)
-                            except:
-                                continue
-                except:
-                    continue
+        for engine in ['openpyxl', 'xlrd']:
+            try:
+                excel_file = pd.ExcelFile(file_content, engine=engine)
+                for sheet_name in excel_file.sheet_names:
+                    try:
+                        df = pd.read_excel(file_content, sheet_name=sheet_name, engine=engine)
+                        if not df.empty and len(df.columns) > 1:
+                            logging.info(f"✅ Datos encontrados en hoja {sheet_name}: {len(df)} filas")
+                            return clean_dataframe(df)
+                    except:
+                        continue
+            except:
+                continue
         
         logging.error("❌ No se pudo procesar el Excel con ningún método")
         return None
@@ -217,7 +371,7 @@ def process_excel_file(file_content, table_name):
         return None
 
 def clean_dataframe(df):
-    """Limpiar y normalizar DataFrame"""
+    """Limpiar DataFrame"""
     try:
         # Eliminar filas completamente vacías
         df_clean = df.dropna(how='all')
@@ -257,6 +411,7 @@ def update_database(cursor, df, rango_filas):
     logging.info(f"🔍 Columnas mapeadas: {len(mapeo_columnas)}/{len(columnas_requeridas)}")
     
     registros_actualizados = 0
+    batch_data = []
     
     for index, row in df.iterrows():
         current_id = start_id + index
