@@ -6,6 +6,7 @@ import os
 import logging
 import time
 import urllib3
+import random
 
 # Deshabilitar warnings de SSL (temporal para pruebas)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -63,27 +64,8 @@ def sync_sharepoint_to_sql():
             try:
                 logging.info(f"🔄 Procesando: {config['table_name']}")
                 
-                # ESTRATEGIA MÚLTIPLE DE DESCARGA
-                file_content = None
-                
-                # Método 1: Links públicos (si están disponibles)
-                file_content = download_sharepoint_file_public(config['path'])
-                
-                # Método 2: URL directa de SharePoint
-                if file_content is None:
-                    file_content = download_sharepoint_file_direct(
-                        config['path'], 
-                        SHAREPOINT_USERNAME, 
-                        SHAREPOINT_PASSWORD
-                    )
-                
-                # Método 3: Método simple
-                if file_content is None:
-                    file_content = download_sharepoint_file_simple(
-                        config['path'], 
-                        SHAREPOINT_USERNAME, 
-                        SHAREPOINT_PASSWORD
-                    )
+                # SOLO USAR LINKS PÚBLICOS (método más confiable)
+                file_content = download_sharepoint_file_public_advanced(config['path'])
                 
                 if file_content is None:
                     logging.error(f"❌ No se pudo descargar: {config['path']}")
@@ -130,8 +112,8 @@ def connect_sql_with_retry(connection_string, max_retries=3):
                 logging.error(f"💥 Todos los intentos fallaron: {str(e)}")
                 raise e
 
-def download_sharepoint_file_public(file_path):
-    """SOLUCIÓN DEFINITIVA: Usar links públicos"""
+def download_sharepoint_file_public_advanced(file_path):
+    """SOLUCIÓN AVANZADA: Simular navegador real completamente"""
     
     # LINKS PÚBLICOS ÚNICOS - TUS LINKS REALES
     public_links = {
@@ -144,105 +126,129 @@ def download_sharepoint_file_public(file_path):
     
     if filename in public_links:
         try:
-            logging.info(f"🔗 Descargando via LINK PÚBLICO: {filename}")
+            logging.info(f"🔗 Descargando via LINK PÚBLICO AVANZADO: {filename}")
             
             session = requests.Session()
-            # Headers específicos para links de SharePoint
+            
+            # AGENTES DE USUARIO REALES (rotación)
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36 Edg/117.0.2045.47',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/119.0'
+            ]
+            
+            # HEADERS COMPLETOS simulando navegador real
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                'User-Agent': random.choice(user_agents),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+                'sec-ch-ua': '"Google Chrome";v="119", "Chromium";v="119", "Not?A_Brand";v="24"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"'
             }
             
-            response = session.get(public_links[filename], headers=headers, timeout=60, verify=False)
+            # Pequeña pausa aleatoria (como humano)
+            time.sleep(random.uniform(1, 3))
+            
+            # PRIMERO: Hacer una request de "navegación" como haría un humano
+            logging.info("🌐 Simulando navegación inicial...")
+            preview_response = session.get(
+                public_links[filename], 
+                headers=headers, 
+                timeout=30, 
+                verify=False,
+                allow_redirects=True
+            )
+            
+            # Pequeña pausa entre requests
+            time.sleep(random.uniform(0.5, 2))
+            
+            # SEGUNDO: Descargar el archivo con headers específicos para descarga
+            download_headers = headers.copy()
+            download_headers.update({
+                'Accept': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, */*',
+                'Referer': public_links[filename]
+            })
+            
+            logging.info("📥 Realizando descarga...")
+            response = session.get(
+                public_links[filename], 
+                headers=download_headers, 
+                timeout=60, 
+                verify=False,
+                allow_redirects=True,
+                stream=True
+            )
+            
+            logging.info(f"📊 Response: HTTP {response.status_code}, Size: {len(response.content) if response.content else 0} bytes")
             
             if response.status_code == 200:
                 content = response.content
-                # Verificar que sea un Excel válido
-                if len(content) > 1000 and (content[:4] == b'PK\x03\x04' or b'xl/' in content[:100]):
-                    logging.info(f"✅ LINK PÚBLICO EXITOSO: {len(content)} bytes")
-                    return BytesIO(content)
+                
+                # ANÁLISIS DETALLADO del contenido
+                if len(content) > 1000:
+                    # Verificar si es HTML (error)
+                    try:
+                        content_start = content[:1000].decode('utf-8', errors='ignore')
+                        if any(keyword in content_start.lower() for keyword in ['<!doctype', '<html', 'login', 'sign in', 'microsoft', 'error']):
+                            logging.error("❌ SharePoint devolvió página HTML/Login")
+                            logging.info(f"📄 Inicio del contenido: {content_start[:300]}")
+                            return None
+                    except:
+                        pass
+                    
+                    # Verificar si es Excel válido
+                    if content[:4] == b'PK\x03\x04':  # Firma ZIP de Office
+                        logging.info(f"✅ ÉXITO: Excel válido detectado - {len(content)} bytes")
+                        return BytesIO(content)
+                    elif b'[Content_Types]' in content[:2000] or b'xl/' in content[:1000]:
+                        logging.info(f"✅ ÉXITO: Contenido Excel detectado - {len(content)} bytes")
+                        return BytesIO(content)
+                    else:
+                        # Intentar de todos modos (puede ser Excel con encoding diferente)
+                        logging.warning(f"⚠️ Firma Excel no estándar, intentando procesar...")
+                        logging.info(f"🔍 Primeros bytes (hex): {content[:8].hex()}")
+                        return BytesIO(content)
                 else:
-                    logging.error(f"❌ Link público no devolvió Excel válido")
+                    logging.error(f"❌ Archivo demasiado pequeño: {len(content)} bytes")
                     return None
             else:
-                logging.error(f"❌ Error link público: HTTP {response.status_code}")
+                logging.error(f"❌ Error HTTP {response.status_code}")
+                # Intentar analizar el error
+                if response.content:
+                    error_content = response.content[:500].decode('utf-8', errors='ignore')
+                    logging.info(f"📄 Contenido error: {error_content}")
                 return None
                 
         except Exception as e:
-            logging.error(f"❌ Error link público: {str(e)}")
+            logging.error(f"❌ Error en descarga avanzada: {str(e)}")
             return None
     else:
         logging.warning(f"⚠️ No hay link público configurado para: {filename}")
         return None
 
-def download_sharepoint_file_direct(file_path, username, password):
-    """URL directa de SharePoint como backup"""
-    try:
-        site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
-        direct_url = f"{site_url}/_layouts/15/download.aspx?SourceUrl=/{file_path}"
-        
-        logging.info(f"📥 Intentando URL directa: {file_path}")
-        
-        session = requests.Session()
-        session.auth = (username, password)
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = session.get(direct_url, headers=headers, timeout=30, verify=False)
-        
-        if response.status_code == 200 and len(response.content) > 1000:
-            logging.info(f"✅ URL directa exitosa: {len(response.content)} bytes")
-            return BytesIO(response.content)
-        else:
-            logging.warning(f"⚠️ URL directa falló: HTTP {response.status_code}")
-            return None
-            
-    except Exception as e:
-        logging.warning(f"⚠️ Error URL directa: {str(e)}")
-        return None
-
-def download_sharepoint_file_simple(file_path, username, password):
-    """Método simple como último recurso"""
-    try:
-        site_url = "https://escuelarefrigeracion.sharepoint.com/sites/ASESORASCOMERCIALES"
-        full_url = f"{site_url}/{file_path}"
-        
-        logging.info(f"📥 Intentando método simple: {file_path}")
-        
-        session = requests.Session()
-        session.auth = (username, password)
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': '*/*'
-        }
-        
-        response = session.get(full_url, headers=headers, timeout=30, verify=False, allow_redirects=True)
-        
-        if response.status_code == 200 and len(response.content) > 1000:
-            logging.info(f"✅ Método simple exitoso: {len(response.content)} bytes")
-            return BytesIO(response.content)
-        else:
-            logging.warning(f"⚠️ Método simple falló: HTTP {response.status_code}")
-            return None
-            
-    except Exception as e:
-        logging.warning(f"⚠️ Error método simple: {str(e)}")
-        return None
-
 def find_table_in_excel(file_content, table_name):
-    """Buscar tabla específica en el Excel"""
+    """Buscar tabla específica en el Excel con manejo robusto"""
     try:
-        # Intentar con diferentes engines
+        # Intentar con diferentes engines y estrategias
         engines = ['openpyxl', 'xlrd']
         
         for engine in engines:
             try:
+                logging.info(f"🔧 Probando engine: {engine}")
                 excel_file = pd.ExcelFile(file_content, engine=engine)
                 
-                # Estrategia 1: Buscar por nombre de tabla
+                # Estrategia 1: Buscar por nombre de tabla en celdas
                 for sheet_name in excel_file.sheet_names:
                     try:
                         df_temp = pd.read_excel(file_content, sheet_name=sheet_name, header=None, engine=engine)
@@ -253,7 +259,8 @@ def find_table_in_excel(file_content, table_name):
                                     logging.info(f"✅ Tabla '{table_name}' encontrada en hoja: {sheet_name}, fila: {row_idx+1}")
                                     df = pd.read_excel(file_content, sheet_name=sheet_name, header=row_idx, engine=engine)
                                     return df
-                    except Exception:
+                    except Exception as e:
+                        logging.warning(f"⚠️ Error en hoja {sheet_name}: {str(e)}")
                         continue
                 
                 # Estrategia 2: Usar primera hoja con datos
@@ -262,23 +269,26 @@ def find_table_in_excel(file_content, table_name):
                     if not df.empty:
                         logging.info(f"✅ Usando primera hoja con datos (engine: {engine})")
                         return df
-                except Exception:
+                except Exception as e:
+                    logging.warning(f"⚠️ Error primera hoja: {str(e)}")
                     pass
                     
                 # Estrategia 3: Probar todas las hojas
                 for sheet_name in excel_file.sheet_names:
                     try:
                         df = pd.read_excel(file_content, sheet_name=sheet_name, engine=engine)
-                        if not df.empty:
+                        if not df.empty and len(df.columns) > 1:  # Debe tener varias columnas
                             logging.info(f"✅ Datos encontrados en hoja: {sheet_name} (engine: {engine})")
                             return df
-                    except Exception:
+                    except Exception as e:
+                        logging.warning(f"⚠️ Error hoja {sheet_name}: {str(e)}")
                         continue
                         
             except Exception as e:
                 logging.warning(f"⚠️ Engine {engine} falló: {str(e)}")
                 continue
                 
+        logging.error("❌ No se pudo leer el archivo con ningún engine")
         return None
         
     except Exception as e:
