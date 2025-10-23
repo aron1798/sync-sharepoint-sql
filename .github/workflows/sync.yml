@@ -16,6 +16,15 @@ jobs:
     - name: 📥 Descargar código y Excel
       uses: actions/checkout@v4
       
+    - name: 🐍 Configurar Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: 📚 Instalar dependencias Python
+      run: |
+        pip install -r requirements.txt
+        
     - name: 🚀 Ejecutar sincronización
       env:
         SQL_SERVER: ${{ secrets.SQL_SERVER }}
