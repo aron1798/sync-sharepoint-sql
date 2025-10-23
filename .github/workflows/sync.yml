@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'base_combinada.xlsx'
+      - 'base_combinada.xlsx'  # Se ejecuta cuando el Excel cambia
 
 jobs:
   sync-data:
@@ -21,7 +21,15 @@ jobs:
       with:
         python-version: '3.9'
         
-    - name: 📚 Instalar dependencias Python
+    - name: 📦 Instalar ODBC Driver
+      run: |
+        curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
+        curl https://packages.microsoft.com/config/ubuntu/20.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
+        sudo apt-get install -y unixodbc-dev
+        
+    - name: 📚 Instalar dependencias
       run: |
         pip install -r requirements.txt
         
@@ -32,3 +40,10 @@ jobs:
         SQL_USERNAME: ${{ secrets.SQL_USERNAME }}
         SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
       run: python sync_script.py
+        
+    - name: 📤 Subir logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: sync-logs
+        path: sync_script.log
