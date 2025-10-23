@@ -3,9 +3,10 @@ import pyodbc
 import os
 import logging
 import time
+from io import StringIO
 
 def sync_excel_to_sql():
-    logging.info("🚀 Sincronizando Excel -> Azure SQL")
+    logging.info("🚀 Sincronizando Excel -> Azure SQL (MODO RÁPIDO)")
     
     # Configuración
     SQL_SERVER = os.environ['SQL_SERVER']
@@ -16,29 +17,17 @@ def sync_excel_to_sql():
     EXCEL_PATH = "base_combinada.xlsx"
     
     try:
-        # 1. LEER EL EXCEL Y BUSCAR LA TABLA
+        # 1. LEER EXCEL
         logging.info(f"📖 Leyendo Excel: {EXCEL_PATH}")
-        
-        # Primero descubrir qué hojas tiene el Excel
-        excel_file = pd.ExcelFile(EXCEL_PATH)
-        logging.info(f"📋 Hojas disponibles: {excel_file.sheet_names}")
-        
-        # Leer la PRIMERA hoja (donde probablemente está tu tabla)
-        df = pd.read_excel(EXCEL_PATH, sheet_name=0)  # sheet_name=0 es la primera hoja
+        df = pd.read_excel(EXCEL_PATH, sheet_name=0)
         
         if df.empty:
             logging.error("❌ Excel está vacío")
             return
             
         logging.info(f"✅ Excel leído: {len(df)} filas, {len(df.columns)} columnas")
-        logging.info(f"📊 Columnas encontradas: {list(df.columns)}")
         
-        # 2. VERIFICAR QUE TENGA LAS COLUMNAS CORRECTAS
-        columnas_encontradas = [col for col in df.columns if 'Base_Azure' in str(col)]
-        if columnas_encontradas:
-            logging.info(f"🎯 Tabla 'Base_Azure' detectada en columnas: {columnas_encontradas}")
-        
-        # 3. CONECTAR A SQL
+        # 2. CONECTAR A SQL
         connection_string = f"""
         Driver={{ODBC Driver 18 for SQL Server}};
         Server={SQL_SERVER};
@@ -53,165 +42,144 @@ def sync_excel_to_sql():
         conn = connect_sql_with_retry(connection_string)
         cursor = conn.cursor()
         
-        # 4. VERIFICAR SI LA TABLA TIENE DATOS
+        # 3. VERIFICAR SI LA TABLA TIENE DATOS
         cursor.execute("SELECT COUNT(*) FROM vendedoras_data")
         count = cursor.fetchone()[0]
         
         if count == 0:
-            logging.info("🆕 Tabla vacía - Insertando datos por primera vez")
-            # INSERTAR DATOS
-            registros_procesados = insert_database(cursor, df)
-            logging.info(f"🎉 INSERT COMPLETADO: {registros_procesados} registros INSERTADOS")
+            logging.info("🆕 Tabla vacía - INSERT RÁPIDO con BULK")
+            registros_procesados = fast_bulk_insert(cursor, conn, df)
+            logging.info(f"🎉 INSERT RÁPIDO COMPLETADO: {registros_procesados} registros en segundos")
         else:
-            logging.info(f"🔄 Tabla tiene {count} registros - Actualizando datos")
-            # ACTUALIZAR DATOS (UPDATE)
-            registros_procesados = update_database(cursor, df)
-            logging.info(f"🎉 UPDATE COMPLETADO: {registros_procesados} registros ACTUALIZADOS")
+            logging.info(f"🔄 Tabla tiene {count} registros - TRUNCATE + BULK INSERT")
+            registros_procesados = fast_truncate_and_insert(cursor, conn, df)
+            logging.info(f"🎉 ACTUALIZACIÓN RÁPIDA COMPLETADA: {registros_procesados} registros")
         
-        # 5. CONFIRMAR
-        conn.commit()
         conn.close()
         
     except Exception as e:
         logging.error(f"💥 Error: {str(e)}")
         raise
 
-def insert_database(cursor, df):
-    """INSERTAR datos en Azure SQL (primera vez)"""
+def fast_bulk_insert(cursor, conn, df):
+    """INSERT RÁPIDO usando tabla temporal y BULK OPERATIONS"""
+    start_time = time.time()
+    
+    # Limpiar y preparar datos
     df_clean = df.dropna(how='all').dropna(axis=1, how='all')
     df_clean.columns = [str(col).strip() for col in df_clean.columns]
     
-    # Mapeo de columnas
-    mapeo_columnas = {}
-    columnas_requeridas = ['Ejecutivo', 'Telefono', 'FechaCreada', 'Sede', 'Programa', 'Turno', 
-                          'Codigo', 'Canal', 'Intervalo', 'Medio', 'Contacto', 'Interesado', 
-                          'Estado', 'Objecion', 'Observacion']
+    # Agregar columna ID
+    df_clean['ID'] = range(1, len(df_clean) + 1)
     
-    for col_requerida in columnas_requeridas:
-        for col_real in df_clean.columns:
-            if col_requerida.lower() in col_real.lower():
-                mapeo_columnas[col_requerida] = col_real
-                break
+    # 1. CREAR TABLA TEMPORAL
+    cursor.execute("""
+        CREATE TABLE #TempVendedoras (
+            ID INT,
+            Ejecutivo NVARCHAR(100),
+            Telefono NVARCHAR(50),
+            FechaCreada DATETIME,
+            Sede NVARCHAR(100),
+            Programa NVARCHAR(100),
+            Turno NVARCHAR(50),
+            Codigo NVARCHAR(50),
+            Canal NVARCHAR(100),
+            Intervalo NVARCHAR(50),
+            Medio NVARCHAR(100),
+            Contacto NVARCHAR(100),
+            Interesado NVARCHAR(100),
+            Estado NVARCHAR(100),
+            Objecion NVARCHAR(500),
+            Observacion NVARCHAR(1000)
+        )
+    """)
     
-    logging.info(f"🔍 Columnas mapeadas: {len(mapeo_columnas)}/{len(columnas_requeridas)}")
+    # 2. INSERT MASIVO usando executemany (MUCHO más rápido)
+    placeholders = ','.join(['?'] * 16)
+    sql = f"INSERT INTO #TempVendedoras VALUES ({placeholders})"
     
-    registros_insertados = 0
-    
+    # Preparar datos para bulk insert
+    bulk_data = []
     for index, row in df_clean.iterrows():
         try:
-            valores = []
-            for col_requerida in columnas_requeridas:
-                col_real = mapeo_columnas.get(col_requerida, col_requerida)
-                valor = row.get(col_real, '')
-                
-                # Manejar fechas
-                if col_requerida == 'FechaCreada' and pd.notna(valor):
-                    try:
-                        if isinstance(valor, str):
-                            valor = pd.to_datetime(valor, errors='coerce')
-                        if pd.notna(valor):
-                            valor = valor.strftime('%Y-%m-%d %H:%M:%S')
-                        else:
-                            valor = None
-                    except:
-                        valor = None
-                elif pd.isna(valor):
-                    valor = None
-                
-                valores.append(valor)
-            
-            current_id = index + 1
-            
-            # INSERTAR
-            cursor.execute("""
-                INSERT INTO vendedoras_data (
-                    ID, Ejecutivo, Telefono, FechaCreada, Sede, Programa, Turno, 
-                    Codigo, Canal, Intervalo, Medio, Contacto, Interesado, Estado, 
-                    Objecion, Observacion
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, current_id, *valores)
-            
-            registros_insertados += 1
-            
-            # Log cada 100 registros
-            if registros_insertados % 100 == 0:
-                logging.info(f"📊 Progreso INSERT: {registros_insertados} registros")
-            
+            # Mapear columnas automáticamente
+            valores = [
+                row.get('ID', index + 1),
+                str(row.get('Ejecutivo', ''))[:100],
+                str(row.get('Telefono', ''))[:50],
+                parse_fecha(row.get('FechaCreada')),
+                str(row.get('Sede', ''))[:100],
+                str(row.get('Programa', ''))[:100],
+                str(row.get('Turno', ''))[:50],
+                str(row.get('Codigo', ''))[:50],
+                str(row.get('Canal', ''))[:100],
+                str(row.get('Intervalo', ''))[:50],
+                str(row.get('Medio', ''))[:100],
+                str(row.get('Contacto', ''))[:100],
+                str(row.get('Interesado', ''))[:100],
+                str(row.get('Estado', ''))[:100],
+                str(row.get('Objecion', ''))[:500],
+                str(row.get('Observacion', ''))[:1000]
+            ]
+            bulk_data.append(valores)
         except Exception as e:
-            logging.warning(f"⚠️ Error insertando fila {index}: {str(e)}")
+            logging.warning(f"⚠️ Error procesando fila {index}: {e}")
             continue
     
-    return registros_insertados
+    # 3. EJECUTAR BULK INSERT (TODO DE UNA VEZ)
+    logging.info(f"⚡ Insertando {len(bulk_data)} registros de una vez...")
+    cursor.fast_executemany = True  # 🔥 ACTIVAR MODO RÁPIDO
+    cursor.executemany(sql, bulk_data)
+    
+    # 4. COPIAR DE TEMPORAL A TABLA REAL
+    cursor.execute("""
+        INSERT INTO vendedoras_data 
+        SELECT * FROM #TempVendedoras
+    """)
+    
+    # 5. LIMPIAR TABLA TEMPORAL
+    cursor.execute("DROP TABLE #TempVendedoras")
+    
+    conn.commit()
+    
+    end_time = time.time()
+    logging.info(f"⏱️ Tiempo total: {end_time - start_time:.2f} segundos")
+    
+    return len(bulk_data)
 
-def update_database(cursor, df):
-    """ACTUALIZAR datos existentes en Azure SQL"""
-    df_clean = df.dropna(how='all').dropna(axis=1, how='all')
-    df_clean.columns = [str(col).strip() for col in df_clean.columns]
+def fast_truncate_and_insert(cursor, conn, df):
+    """MÁS RÁPIDO: Borrar todo e insertar de nuevo"""
+    start_time = time.time()
     
-    # Mapeo de columnas
-    mapeo_columnas = {}
-    columnas_requeridas = ['Ejecutivo', 'Telefono', 'FechaCreada', 'Sede', 'Programa', 'Turno', 
-                          'Codigo', 'Canal', 'Intervalo', 'Medio', 'Contacto', 'Interesado', 
-                          'Estado', 'Objecion', 'Observacion']
+    # 1. BORRAR TODOS LOS DATOS EXISTENTES
+    cursor.execute("TRUNCATE TABLE vendedoras_data")
+    logging.info("🗑️ Tabla limpiada (TRUNCATE)")
     
-    for col_requerida in columnas_requeridas:
-        for col_real in df_clean.columns:
-            if col_requerida.lower() in col_real.lower():
-                mapeo_columnas[col_requerida] = col_real
-                break
+    # 2. INSERTAR NUEVOS DATOS (más rápido que update)
+    registros = fast_bulk_insert(cursor, conn, df)
     
-    registros_actualizados = 0
+    end_time = time.time()
+    logging.info(f"⏱️ Tiempo total TRUNCATE+INSERT: {end_time - start_time:.2f} segundos")
     
-    for index, row in df_clean.iterrows():
-        try:
-            valores = []
-            for col_requerida in columnas_requeridas:
-                col_real = mapeo_columnas.get(col_requerida, col_requerida)
-                valor = row.get(col_real, '')
-                
-                if col_requerida == 'FechaCreada' and pd.notna(valor):
-                    try:
-                        if isinstance(valor, str):
-                            valor = pd.to_datetime(valor, errors='coerce')
-                        if pd.notna(valor):
-                            valor = valor.strftime('%Y-%m-%d %H:%M:%S')
-                        else:
-                            valor = None
-                    except:
-                        valor = None
-                elif pd.isna(valor):
-                    valor = None
-                
-                valores.append(valor)
-            
-            current_id = index + 1
-            valores.append(current_id)
-            
-            # ACTUALIZAR
-            cursor.execute("""
-                UPDATE vendedoras_data SET
-                    Ejecutivo=?, Telefono=?, FechaCreada=?, Sede=?,
-                    Programa=?, Turno=?, Codigo=?, Canal=?, Intervalo=?,
-                    Medio=?, Contacto=?, Interesado=?, Estado=?,
-                    Objecion=?, Observacion=?
-                WHERE ID = ?
-            """, *valores)
-            
-            registros_actualizados += 1
-            
-            if registros_actualizados % 100 == 0:
-                logging.info(f"📊 Progreso UPDATE: {registros_actualizados} registros")
-            
-        except Exception as e:
-            logging.warning(f"⚠️ Error actualizando fila {index}: {str(e)}")
-            continue
-    
-    return registros_actualizados
+    return registros
+
+def parse_fecha(valor):
+    """Manejo rápido de fechas"""
+    if pd.isna(valor):
+        return None
+    try:
+        if isinstance(valor, str):
+            return pd.to_datetime(valor, errors='coerce').strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            return valor.strftime('%Y-%m-%d %H:%M:%S')
+    except:
+        return None
 
 def connect_sql_with_retry(connection_string, max_retries=3):
     for attempt in range(max_retries):
         try:
             conn = pyodbc.connect(connection_string)
+            conn.timeout = 300  # Timeout más largo para operaciones largas
             logging.info(f"✅ Conexión SQL exitosa (intento {attempt + 1})")
             return conn
         except pyodbc.OperationalError as e:
