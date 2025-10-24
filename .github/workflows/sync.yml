@@ -1,4 +1,4 @@
-name: Sync Excel to Azure SQL
+name: Sync Excel to Supabase
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'base_combinada.xlsx'  # Se ejecuta cuando el Excel cambia
+      - 'base_combinada.xlsx'
 
 jobs:
   sync-data:
@@ -21,29 +21,13 @@ jobs:
       with:
         python-version: '3.9'
         
-    - name: 📦 Instalar ODBC Driver
-      run: |
-        curl https://packages.microsoft.com/keys/microsoft.asc | sudo tee /etc/apt/trusted.gpg.d/microsoft.asc
-        curl https://packages.microsoft.com/config/ubuntu/20.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
-        sudo apt-get update
-        sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
-        sudo apt-get install -y unixodbc-dev
-        
     - name: 📚 Instalar dependencias
       run: |
+        python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: 🚀 Ejecutar sincronización
+    - name: 🚀 Ejecutar sincronización Supabase
       env:
-        SQL_SERVER: ${{ secrets.SQL_SERVER }}
-        SQL_DATABASE: ${{ secrets.SQL_DATABASE }}
-        SQL_USERNAME: ${{ secrets.SQL_USERNAME }}
-        SQL_PASSWORD: ${{ secrets.SQL_PASSWORD }}
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       run: python sync_script.py
-        
-    - name: 📤 Subir logs
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: sync-logs
-        path: sync_script.log
