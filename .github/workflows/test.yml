@@ -1,0 +1,45 @@
+name: Test Supabase Connection
+
+on: workflow_dispatch
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 📥 Descargar código
+      uses: actions/checkout@v4
+      
+    - name: 🐍 Configurar Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: 📚 Instalar supabase
+      run: pip install supabase
+      
+    - name: 🧪 Ejecutar test
+      env:
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      run: |
+        python -c "
+import os
+from supabase import create_client
+
+url = '${{ secrets.SUPABASE_URL }}'
+key = '${{ secrets.SUPABASE_KEY }}'
+
+print('🔗 URL:', url)
+print('🔑 Key:', key[:10] + '...' if key else 'Empty')
+
+try:
+    supabase = create_client(url, key)
+    print('✅ Conexión exitosa!')
+    
+    # Probar lista de tablas
+    response = supabase.table('vendedoras_data').select('*').limit(1).execute()
+    print('✅ Tabla accesible!')
+    
+except Exception as e:
+    print('❌ Error:', str(e))
+"
