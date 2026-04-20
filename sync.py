@@ -20,7 +20,7 @@ SUPABASE_KEY   = os.environ["SUPABASE_KEY2"]
 
 SHAREPOINT_SITE = "escuelarefrigeracion.sharepoint.com"
 SITE_PATH       = "/sites/ASESORASCOMERCIALES"
-FOLDER_PATH     = "Documents/2. BASE PROSPECTOS/BASE GENERAL"
+SUBFOLDER       = "2. BASE PROSPECTOS/BASE GENERAL"
 SCOPES          = ["Sites.Read.All", "Files.Read.All"]
 
 COLUMNAS = [
@@ -29,7 +29,6 @@ COLUMNAS = [
     "Contacto", "Interesado", "Estado", "Objecion", "Observacion"
 ]
 
-# Mapeo de nombre de archivo → nombre de tabla Excel
 TABLAS = {
     "Base Carmen Montoya.xlsx":   "Base_Carmen",
     "Base Milagros Vargas.xlsx":  "Base_Gerson",
@@ -56,20 +55,38 @@ def get_site_id(token):
     r.raise_for_status()
     return r.json()["id"]
 
-def list_excel_files(token, site_id):
+def get_drive_id(token, site_id):
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{FOLDER_PATH}:/children"
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives"
+    r = requests.get(url, headers=headers)
+    r.raise_for_status()
+    drives = r.json().get("value", [])
+    print(f"  📚 Bibliotecas encontradas: {[d['name'] for d in drives]}")
+
+    # Buscar biblioteca de documentos
+    for drive in drives:
+        name_lower = drive["name"].lower()
+        if "document" in name_lower or "compartid" in name_lower:
+            print(f"  ✅ Usando biblioteca: {drive['name']}")
+            return drive["id"]
+
+    # Si no encuentra, usar la primera
+    print(f"  ⚠️ Usando primera biblioteca: {drives[0]['name']}")
+    return drives[0]["id"]
+
+def list_excel_files(token, drive_id):
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{SUBFOLDER}:/children"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
     items = r.json().get("value", [])
     excels = [f for f in items if f["name"].endswith((".xlsx", ".xls"))]
-    print(f"  📂 Carpeta: {FOLDER_PATH}")
     print(f"  📊 Archivos encontrados: {[f['name'] for f in excels]}")
     return excels
 
-def download_excel(token, site_id, file_id, file_name):
+def download_excel(token, drive_id, file_id, file_name):
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{file_id}/content"
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{file_id}/content"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
 
@@ -135,13 +152,14 @@ print("="*50)
 
 # 1. Leer Excel de SharePoint
 print("\n📁 Leyendo Excel de SharePoint...")
-token   = get_access_token()
-site_id = get_site_id(token)
-excels  = list_excel_files(token, site_id)
+token    = get_access_token()
+site_id  = get_site_id(token)
+drive_id = get_drive_id(token, site_id)
+excels   = list_excel_files(token, drive_id)
 
 all_dfs = []
 for file in excels:
-    df = download_excel(token, site_id, file["id"], file["name"])
+    df = download_excel(token, drive_id, file["id"], file["name"])
     for col in COLUMNAS:
         if col not in df.columns:
             df[col] = "-"
