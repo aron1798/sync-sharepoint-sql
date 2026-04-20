@@ -3,7 +3,10 @@ name: Sync Data
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'  # cada 20 min, todos los días, 24/7
+    - cron: '2-59/5 * * * *'  # cada 5 min en minutos 2,7,12,17... (menos cola)
+
+permissions:
+  contents: write
 
 jobs:
   sync:
@@ -26,3 +29,10 @@ jobs:
           PG_DB: ${{ secrets.PG_DB }}
           SUPABASE_URL2: ${{ secrets.SUPABASE_URL2 }}
           SUPABASE_KEY2: ${{ secrets.SUPABASE_KEY2 }}
+      - name: Mantener repo activo
+        run: |
+          date -u > last_run.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_run.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "🔄 sync $(date -u +%H:%M)" && git push)
