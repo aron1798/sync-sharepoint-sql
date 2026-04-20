@@ -6,6 +6,7 @@ import psycopg2
 import io
 import openpyxl
 from supabase import create_client
+from concurrent.futures import ThreadPoolExecutor
 
 # ── Credenciales ──────────────────────────────────────────
 CLIENT_ID      = os.environ["MS_CLIENT_ID"]
@@ -61,15 +62,10 @@ def get_drive_id(token, site_id):
     r = requests.get(url, headers=headers)
     r.raise_for_status()
     drives = r.json().get("value", [])
-    print(f"  📚 Bibliotecas encontradas: {[d['name'] for d in drives]}")
-
     for drive in drives:
         name_lower = drive["name"].lower()
         if "document" in name_lower or "compartid" in name_lower:
-            print(f"  ✅ Usando biblioteca: {drive['name']}")
             return drive["id"]
-
-    print(f"  ⚠️ Usando primera biblioteca: {drives[0]['name']}")
     return drives[0]["id"]
 
 def list_excel_files(token, drive_id):
@@ -78,20 +74,23 @@ def list_excel_files(token, drive_id):
     r = requests.get(url, headers=headers)
     r.raise_for_status()
     items = r.json().get("value", [])
-    excels = [f for f in items if f["name"].endswith((".xlsx", ".xls"))]
-    print(f"  📊 Archivos encontrados: {[f['name'] for f in excels]}")
-    return excels
+    return [f for f in items if f["name"].endswith((".xlsx", ".xls"))]
 
-def download_excel(token, drive_id, file_id, file_name):
+def download_and_process(args):
+    token, drive_id, file_id, file_name = args
     headers = {"Authorization": f"Bearer {token}"}
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{file_id}/content"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
 
     nombre_tabla = TABLAS.get(file_name)
-    wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
+    wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True, read_only=True)
 
+    df = None
     if nombre_tabla:
+        # En modo read_only las tablas no están disponibles, recargar si es necesario
+        wb.close()
+        wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
         for sheet in wb.worksheets:
             if nombre_tabla in sheet.tables:
                 tabla = sheet.tables[nombre_tabla]
@@ -99,13 +98,23 @@ def download_excel(token, drive_id, file_id, file_name):
                 headers_row = [cell.value for cell in data[0]]
                 rows = [[cell.value for cell in row] for row in data[1:]]
                 df = pd.DataFrame(rows, columns=headers_row)
-                print(f"  ✅ {file_name} (tabla: {nombre_tabla}): {len(df)} filas")
-                return df
-        print(f"  ⚠️ No se encontró tabla {nombre_tabla} en {file_name}, leyendo primera hoja")
+                break
 
-    df = pd.read_excel(io.BytesIO(r.content))
-    print(f"  ⚠️ {file_name} (fallback): {len(df)} filas")
-    return df
+    if df is None:
+        df = pd.read_excel(io.BytesIO(r.content))
+
+    # Asegurar columnas estándar
+    for col in COLUMNAS:
+        if col not in df.columns:
+            df[col] = "-"
+
+    # Formatear fecha
+    if "Fechacreada" in df.columns:
+        df["Fechacreada"] = pd.to_datetime(df["Fechacreada"], errors="coerce").dt.strftime("%d/%m/%Y")
+        df["Fechacreada"] = df["Fechacreada"].fillna("-")
+
+    print(f"  ✅ {file_name}: {len(df)} filas")
+    return df[COLUMNAS]
 
 # ── PostgreSQL ────────────────────────────────────────────
 def get_postgres_data():
@@ -127,7 +136,6 @@ def get_postgres_data():
     df["phone_number"] = df["phone_number"].astype(str)
     df["phone_number"] = df["phone_number"].str.replace(r"^\+51", "", regex=True)
     df["phone_number"] = df["phone_number"].str.replace("+", "", regex=False)
-
     df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%d/%m/%Y")
 
     df_mapped = pd.DataFrame("-", index=df.index, columns=COLUMNAS)
@@ -140,56 +148,53 @@ def get_postgres_data():
     return df_mapped
 
 # ── MAIN ──────────────────────────────────────────────────
+import time
+inicio = time.time()
+
 print("="*50)
 print("🚀 Iniciando sincronización...")
 print("="*50)
 
-# 1. Leer Excel de SharePoint
-print("\n📁 Leyendo Excel de SharePoint...")
+# 1. Preparar
+print("\n🔑 Autenticando...")
 token    = get_access_token()
 site_id  = get_site_id(token)
 drive_id = get_drive_id(token, site_id)
 excels   = list_excel_files(token, drive_id)
 
-all_dfs = []
-for file in excels:
-    if file["name"] not in TABLAS:
-        print(f"  ⏭️ Saltando {file['name']} (no está en el mapeo)")
-        continue
-    df = download_excel(token, drive_id, file["id"], file["name"])
-    for col in COLUMNAS:
-        if col not in df.columns:
-            df[col] = "-"
-    # Formatear fecha como DD/MM/YYYY
-    if "Fechacreada" in df.columns:
-        df["Fechacreada"] = pd.to_datetime(df["Fechacreada"], errors="coerce").dt.strftime("%d/%m/%Y")
-        df["Fechacreada"] = df["Fechacreada"].fillna("-")
-    all_dfs.append(df[COLUMNAS])
+# 2. Descargar Excel EN PARALELO
+print("\n📁 Descargando Excel en paralelo...")
+tareas = [
+    (token, drive_id, f["id"], f["name"])
+    for f in excels if f["name"] in TABLAS
+]
 
-# 2. Leer PostgreSQL
+all_dfs = []
+with ThreadPoolExecutor(max_workers=5) as executor:
+    resultados = list(executor.map(download_and_process, tareas))
+    all_dfs.extend(resultados)
+
+# 3. PostgreSQL en paralelo (se ejecuta mientras bajan los Excel en futuro mejor)
 print("\n🗄️  Leyendo PostgreSQL...")
 df_pg = get_postgres_data()
 all_dfs.append(df_pg)
 
-# 3. Unir todo
+# 4. Unir todo
 df_final = pd.concat(all_dfs, ignore_index=True)
-df_final = df_final.fillna("-")
-df_final = df_final.astype(str)
-df_final = df_final.replace("nan", "-")
+df_final = df_final.fillna("-").astype(str).replace("nan", "-")
 print(f"\n✅ Total unificado: {len(df_final)} filas")
 
-# 4. Borrar datos anteriores en Supabase
-print("\n🗑️  Limpiando tabla anterior...")
+# 5. Subir a Supabase (borrar + insertar en lotes grandes)
+print("\n⬆️  Subiendo a Supabase...")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 supabase.table("datos_unificados").delete().neq("id", 0).execute()
 
-# 5. Subir en lotes de 500
-print("\n⬆️  Subiendo a Supabase...")
 records = df_final.to_dict(orient="records")
-batch_size = 500
+batch_size = 1000  # lotes más grandes = menos llamadas
 for i in range(0, len(records), batch_size):
     batch = records[i:i+batch_size]
     supabase.table("datos_unificados").insert(batch).execute()
-    print(f"  📤 Subidos {min(i+batch_size, len(records))}/{len(records)} registros")
+    print(f"  📤 {min(i+batch_size, len(records))}/{len(records)}")
 
-print("\n🎉 ¡Sincronización completada exitosamente!")
+duracion = time.time() - inicio
+print(f"\n🎉 Completado en {duracion:.1f} segundos")
