@@ -20,7 +20,7 @@ SUPABASE_KEY   = os.environ["SUPABASE_KEY2"]
 
 SHAREPOINT_SITE = "escuelarefrigeracion.sharepoint.com"
 SITE_PATH       = "/sites/ASESORASCOMERCIALES"
-FOLDER_PATH     = "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL"
+FOLDER_PATH     = "Shared Documents/2. BASE PROSPECTOS/BASE GENERAL"
 SCOPES          = ["Sites.Read.All", "Files.Read.All"]
 
 COLUMNAS = [
