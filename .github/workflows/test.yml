@@ -3,7 +3,9 @@ name: Sync Data
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/15 * * * *'  # cada 15 minutos
+    - cron: '*/20 13-23 * * 1-6'
+    - cron: '*/20 0-1 * * 2,3,4,5,6,0'
+    - cron: '*/20 13-18 * * 0'
 
 jobs:
   sync:
