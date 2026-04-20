@@ -63,14 +63,12 @@ def get_drive_id(token, site_id):
     drives = r.json().get("value", [])
     print(f"  📚 Bibliotecas encontradas: {[d['name'] for d in drives]}")
 
-    # Buscar biblioteca de documentos
     for drive in drives:
         name_lower = drive["name"].lower()
         if "document" in name_lower or "compartid" in name_lower:
             print(f"  ✅ Usando biblioteca: {drive['name']}")
             return drive["id"]
 
-    # Si no encuentra, usar la primera
     print(f"  ⚠️ Usando primera biblioteca: {drives[0]['name']}")
     return drives[0]["id"]
 
@@ -105,7 +103,6 @@ def download_excel(token, drive_id, file_id, file_name):
                 return df
         print(f"  ⚠️ No se encontró tabla {nombre_tabla} en {file_name}, leyendo primera hoja")
 
-    # Fallback: leer primera hoja
     df = pd.read_excel(io.BytesIO(r.content))
     print(f"  ⚠️ {file_name} (fallback): {len(df)} filas")
     return df
@@ -127,15 +124,12 @@ def get_postgres_data():
     df = pd.read_sql(query, conn)
     conn.close()
 
-    # Limpiar teléfono
     df["phone_number"] = df["phone_number"].astype(str)
     df["phone_number"] = df["phone_number"].str.replace(r"^\+51", "", regex=True)
     df["phone_number"] = df["phone_number"].str.replace("+", "", regex=False)
 
-    # Formatear fecha solo como DD/MM/YYYY
     df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%d/%m/%Y")
 
-    # Mapear a columnas estándar
     df_mapped = pd.DataFrame("-", index=df.index, columns=COLUMNAS)
     df_mapped["Ejecutivo"]   = df["name"]
     df_mapped["Telefono"]    = df["phone_number"]
@@ -159,6 +153,10 @@ excels   = list_excel_files(token, drive_id)
 
 all_dfs = []
 for file in excels:
+    # Solo procesar archivos que están en el mapeo TABLAS
+    if file["name"] not in TABLAS:
+        print(f"  ⏭️ Saltando {file['name']} (no está en el mapeo)")
+        continue
     df = download_excel(token, drive_id, file["id"], file["name"])
     for col in COLUMNAS:
         if col not in df.columns:
