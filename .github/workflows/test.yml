@@ -3,7 +3,7 @@ name: Sync Data
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/20 * * * *'  # cada 20 min, todos los días, 24/7
+    - cron: '*/5 * * * *'  # cada 20 min, todos los días, 24/7
 
 jobs:
   sync:
