@@ -14,8 +14,8 @@ PG_HOST        = os.environ["PG_HOST"]
 PG_USER        = os.environ["PG_USER"]
 PG_PASS        = os.environ["PG_PASS"]
 PG_DB          = os.environ["PG_DB"]
-SUPABASE_URL   = os.environ["SUPABASE_URL"]
-SUPABASE_KEY   = os.environ["SUPABASE_KEY"]
+SUPABASE_URL   = os.environ["SUPABASE_URL2"]
+SUPABASE_KEY   = os.environ["SUPABASE_KEY2"]
 
 SHAREPOINT_SITE = "escuelarefrigeracion.sharepoint.com"
 SITE_PATH       = "/sites/ASESORASCOMERCIALES"
