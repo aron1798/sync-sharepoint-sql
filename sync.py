@@ -21,7 +21,6 @@ SHAREPOINT_SITE = "escuelarefrigeracion.sharepoint.com"
 SITE_PATH       = "/sites/ASESORASCOMERCIALES"
 SCOPES          = ["Sites.Read.All", "Files.Read.All"]
 
-# Columnas finales de la tabla unificada
 COLUMNAS = [
     "Ejecutivo", "Telefono", "Fechacreada", "Sede", "Programa",
     "Turno", "Codigo", "Canal", "Intervalo", "Medio",
@@ -80,16 +79,19 @@ def get_postgres_data():
     df = pd.read_sql(query, conn)
     conn.close()
 
-    # Limpiar teléfono: quitar +51 primero, luego cualquier +
+    # Limpiar teléfono
     df["phone_number"] = df["phone_number"].astype(str)
     df["phone_number"] = df["phone_number"].str.replace(r"^\+51", "", regex=True)
     df["phone_number"] = df["phone_number"].str.replace("+", "", regex=False)
+
+    # Formatear fecha solo como DD/MM/YYYY sin hora
+    df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%d/%m/%Y")
 
     # Mapear a columnas estándar
     df_mapped = pd.DataFrame("-", index=df.index, columns=COLUMNAS)
     df_mapped["Ejecutivo"]   = df["name"]
     df_mapped["Telefono"]    = df["phone_number"]
-    df_mapped["Fechacreada"] = df["created_at"].astype(str)
+    df_mapped["Fechacreada"] = df["created_at"]
     df_mapped["Canal"]       = "COPITO"
 
     print(f"  ✅ PostgreSQL: {len(df_mapped)} filas")
@@ -109,7 +111,6 @@ excels  = list_excel_files(token, site_id)
 all_dfs = []
 for file in excels:
     df = download_excel(token, site_id, file["id"], file["name"])
-    # Asegurar que tenga las columnas estándar
     for col in COLUMNAS:
         if col not in df.columns:
             df[col] = "-"
@@ -123,23 +124,22 @@ all_dfs.append(df_pg)
 # 3. Unir todo
 df_final = pd.concat(all_dfs, ignore_index=True)
 df_final = df_final.fillna("-")
-# Convertir todo a string para evitar problemas con Supabase
 df_final = df_final.astype(str)
 df_final = df_final.replace("nan", "-")
 print(f"\n✅ Total unificado: {len(df_final)} filas")
 
-# 4. Subir a Supabase
-print("\n⬆️  Subiendo a Supabase...")
+# 4. Borrar datos anteriores en Supabase
+print("\n🗑️  Limpiando tabla anterior...")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase.table("datos_unificados").delete().neq("id", 0).execute()
 
-# Borrar datos anteriores y subir los nuevos
+# 5. Subir en lotes de 500
+print("\n⬆️  Subiendo a Supabase...")
 records = df_final.to_dict(orient="records")
-
-# Subir en lotes de 500
 batch_size = 500
 for i in range(0, len(records), batch_size):
     batch = records[i:i+batch_size]
-    supabase.table("datos_unificados").upsert(batch).execute()
+    supabase.table("datos_unificados").insert(batch).execute()
     print(f"  📤 Subidos {min(i+batch_size, len(records))}/{len(records)} registros")
 
 print("\n🎉 ¡Sincronización completada exitosamente!")
