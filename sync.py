@@ -90,6 +90,7 @@ def get_postgres_data():
     df_mapped["Ejecutivo"]   = df["name"]
     df_mapped["Telefono"]    = df["phone_number"]
     df_mapped["Fechacreada"] = df["created_at"].astype(str)
+    df_mapped["Canal"]       = "COPITO"
 
     print(f"  ✅ PostgreSQL: {len(df_mapped)} filas")
     return df_mapped
