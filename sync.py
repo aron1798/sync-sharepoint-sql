@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import psycopg2
 import io
+import openpyxl
 from supabase import create_client
 
 # ── Credenciales ──────────────────────────────────────────
@@ -17,16 +18,25 @@ PG_DB          = os.environ["PG_DB"]
 SUPABASE_URL   = os.environ["SUPABASE_URL2"]
 SUPABASE_KEY   = os.environ["SUPABASE_KEY2"]
 
-SHAREPOINT_SITE   = "escuelarefrigeracion.sharepoint.com"
-SITE_PATH         = "/sites/ASESORASCOMERCIALES"
-FOLDER_PATH       = "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL"
-SCOPES            = ["Sites.Read.All", "Files.Read.All"]
+SHAREPOINT_SITE = "escuelarefrigeracion.sharepoint.com"
+SITE_PATH       = "/sites/ASESORASCOMERCIALES"
+FOLDER_PATH     = "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL"
+SCOPES          = ["Sites.Read.All", "Files.Read.All"]
 
 COLUMNAS = [
     "Ejecutivo", "Telefono", "Fechacreada", "Sede", "Programa",
     "Turno", "Codigo", "Canal", "Intervalo", "Medio",
     "Contacto", "Interesado", "Estado", "Objecion", "Observacion"
 ]
+
+# Mapeo de nombre de archivo → nombre de tabla Excel
+TABLAS = {
+    "Base Carmen Montoya.xlsx":   "Base_Carmen",
+    "Base Milagros Vargas.xlsx":  "Base_Gerson",
+    "Base Diana Chavez.xlsx":     "Base_Diana",
+    "Base Veronica La Rosa.xlsx": "Base_Veronica",
+    "Base Dayana Balabarca.xlsx": "Base_Alonso22",
+}
 
 # ── SharePoint ────────────────────────────────────────────
 def get_access_token():
@@ -48,7 +58,6 @@ def get_site_id(token):
 
 def list_excel_files(token, site_id):
     headers = {"Authorization": f"Bearer {token}"}
-    # Acceder a la subcarpeta específica
     url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{FOLDER_PATH}:/children"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
@@ -63,8 +72,25 @@ def download_excel(token, site_id, file_id, file_name):
     url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/items/{file_id}/content"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
+
+    nombre_tabla = TABLAS.get(file_name)
+    wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
+
+    if nombre_tabla:
+        for sheet in wb.worksheets:
+            if nombre_tabla in sheet.tables:
+                tabla = sheet.tables[nombre_tabla]
+                data = list(sheet[tabla.ref])
+                headers_row = [cell.value for cell in data[0]]
+                rows = [[cell.value for cell in row] for row in data[1:]]
+                df = pd.DataFrame(rows, columns=headers_row)
+                print(f"  ✅ {file_name} (tabla: {nombre_tabla}): {len(df)} filas")
+                return df
+        print(f"  ⚠️ No se encontró tabla {nombre_tabla} en {file_name}, leyendo primera hoja")
+
+    # Fallback: leer primera hoja
     df = pd.read_excel(io.BytesIO(r.content))
-    print(f"  ✅ {file_name}: {len(df)} filas")
+    print(f"  ⚠️ {file_name} (fallback): {len(df)} filas")
     return df
 
 # ── PostgreSQL ────────────────────────────────────────────
@@ -89,7 +115,7 @@ def get_postgres_data():
     df["phone_number"] = df["phone_number"].str.replace(r"^\+51", "", regex=True)
     df["phone_number"] = df["phone_number"].str.replace("+", "", regex=False)
 
-    # Formatear fecha solo como DD/MM/YYYY sin hora
+    # Formatear fecha solo como DD/MM/YYYY
     df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%d/%m/%Y")
 
     # Mapear a columnas estándar
