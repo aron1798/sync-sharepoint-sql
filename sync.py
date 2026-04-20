@@ -17,9 +17,10 @@ PG_DB          = os.environ["PG_DB"]
 SUPABASE_URL   = os.environ["SUPABASE_URL2"]
 SUPABASE_KEY   = os.environ["SUPABASE_KEY2"]
 
-SHAREPOINT_SITE = "escuelarefrigeracion.sharepoint.com"
-SITE_PATH       = "/sites/ASESORASCOMERCIALES"
-SCOPES          = ["Sites.Read.All", "Files.Read.All"]
+SHAREPOINT_SITE   = "escuelarefrigeracion.sharepoint.com"
+SITE_PATH         = "/sites/ASESORASCOMERCIALES"
+FOLDER_PATH       = "Documentos compartidos/2. BASE PROSPECTOS/BASE GENERAL"
+SCOPES            = ["Sites.Read.All", "Files.Read.All"]
 
 COLUMNAS = [
     "Ejecutivo", "Telefono", "Fechacreada", "Sede", "Programa",
@@ -47,11 +48,15 @@ def get_site_id(token):
 
 def list_excel_files(token, site_id):
     headers = {"Authorization": f"Bearer {token}"}
-    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root/children"
+    # Acceder a la subcarpeta específica
+    url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{FOLDER_PATH}:/children"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
     items = r.json().get("value", [])
-    return [f for f in items if f["name"].endswith((".xlsx", ".xls"))]
+    excels = [f for f in items if f["name"].endswith((".xlsx", ".xls"))]
+    print(f"  📂 Carpeta: {FOLDER_PATH}")
+    print(f"  📊 Archivos encontrados: {[f['name'] for f in excels]}")
+    return excels
 
 def download_excel(token, site_id, file_id, file_name):
     headers = {"Authorization": f"Bearer {token}"}
