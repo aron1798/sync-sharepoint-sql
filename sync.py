@@ -153,7 +153,6 @@ excels   = list_excel_files(token, drive_id)
 
 all_dfs = []
 for file in excels:
-    # Solo procesar archivos que están en el mapeo TABLAS
     if file["name"] not in TABLAS:
         print(f"  ⏭️ Saltando {file['name']} (no está en el mapeo)")
         continue
@@ -161,6 +160,10 @@ for file in excels:
     for col in COLUMNAS:
         if col not in df.columns:
             df[col] = "-"
+    # Formatear fecha como DD/MM/YYYY
+    if "Fechacreada" in df.columns:
+        df["Fechacreada"] = pd.to_datetime(df["Fechacreada"], errors="coerce").dt.strftime("%d/%m/%Y")
+        df["Fechacreada"] = df["Fechacreada"].fillna("-")
     all_dfs.append(df[COLUMNAS])
 
 # 2. Leer PostgreSQL
