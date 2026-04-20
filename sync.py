@@ -5,6 +5,7 @@ import pandas as pd
 import psycopg2
 import io
 import openpyxl
+import time
 from supabase import create_client
 from concurrent.futures import ThreadPoolExecutor
 
@@ -84,13 +85,10 @@ def download_and_process(args):
     r.raise_for_status()
 
     nombre_tabla = TABLAS.get(file_name)
-    wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True, read_only=True)
+    wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
 
     df = None
     if nombre_tabla:
-        # En modo read_only las tablas no están disponibles, recargar si es necesario
-        wb.close()
-        wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
         for sheet in wb.worksheets:
             if nombre_tabla in sheet.tables:
                 tabla = sheet.tables[nombre_tabla]
@@ -103,12 +101,10 @@ def download_and_process(args):
     if df is None:
         df = pd.read_excel(io.BytesIO(r.content))
 
-    # Asegurar columnas estándar
     for col in COLUMNAS:
         if col not in df.columns:
             df[col] = "-"
 
-    # Formatear fecha
     if "Fechacreada" in df.columns:
         df["Fechacreada"] = pd.to_datetime(df["Fechacreada"], errors="coerce").dt.strftime("%d/%m/%Y")
         df["Fechacreada"] = df["Fechacreada"].fillna("-")
@@ -148,7 +144,6 @@ def get_postgres_data():
     return df_mapped
 
 # ── MAIN ──────────────────────────────────────────────────
-import time
 inicio = time.time()
 
 print("="*50)
@@ -174,7 +169,7 @@ with ThreadPoolExecutor(max_workers=5) as executor:
     resultados = list(executor.map(download_and_process, tareas))
     all_dfs.extend(resultados)
 
-# 3. PostgreSQL en paralelo (se ejecuta mientras bajan los Excel en futuro mejor)
+# 3. PostgreSQL
 print("\n🗄️  Leyendo PostgreSQL...")
 df_pg = get_postgres_data()
 all_dfs.append(df_pg)
@@ -184,13 +179,14 @@ df_final = pd.concat(all_dfs, ignore_index=True)
 df_final = df_final.fillna("-").astype(str).replace("nan", "-")
 print(f"\n✅ Total unificado: {len(df_final)} filas")
 
-# 5. Subir a Supabase (borrar + insertar en lotes grandes)
-print("\n⬆️  Subiendo a Supabase...")
+# 5. Subir a Supabase con TRUNCATE
+print("\n🗑️  Truncando tabla anterior...")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-supabase.table("datos_unificados").delete().neq("id", 0).execute()
+supabase.rpc("truncate_datos_unificados").execute()
 
+print("\n⬆️  Subiendo a Supabase...")
 records = df_final.to_dict(orient="records")
-batch_size = 1000  # lotes más grandes = menos llamadas
+batch_size = 1000
 for i in range(0, len(records), batch_size):
     batch = records[i:i+batch_size]
     supabase.table("datos_unificados").insert(batch).execute()
