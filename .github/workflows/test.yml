@@ -3,8 +3,11 @@ name: Sync Data
 on:
   workflow_dispatch:
   schedule:
+    # Lun-Sab 8:00am - 6:40pm Perú (13:00-23:40 UTC)
     - cron: '*/20 13-23 * * 1-6'
+    # Lun-Sab 7:00pm - 8:40pm Perú = Mar-Dom 00:00-01:40 UTC
     - cron: '*/20 0-1 * * 2,3,4,5,6,0'
+    # Domingo 8:00am - 1:40pm Perú (13:00-18:40 UTC)
     - cron: '*/20 13-18 * * 0'
 
 jobs:
