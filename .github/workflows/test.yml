@@ -24,5 +24,5 @@ jobs:
           PG_USER: ${{ secrets.PG_USER }}
           PG_PASS: ${{ secrets.PG_PASS }}
           PG_DB: ${{ secrets.PG_DB }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL2 }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY2 }}
