@@ -2,8 +2,6 @@ name: Sync Data
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '2-59/5 * * * *'  # cada 5 min en minutos 2,7,12,17... (menos cola)
 
 permissions:
   contents: write
