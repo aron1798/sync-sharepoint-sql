@@ -43,16 +43,9 @@ TABLAS = {
 }
  
 # ── Mapeo de CÓDIGO DE VENDEDOR ────────────────────────────  # <<< NUEVO
-# Cada Excel ES de una persona conocida -> código de vendedor seguro por archivo.
-CODIGOS_EXCEL = {                                               # <<< NUEVO
-    "Base Carmen Montoya.xlsx":   "20",
-    "Base Milagros Vargas.xlsx":  "16",
-    "Base Diana Chavez.xlsx":     "19",
-    "Base Veronica La Rosa.xlsx": "18",
-    "Base Dayana Balabarca.xlsx": "17",
-}
- 
-# Para el Postgres (Copito), que trae nombres "sucios" y variados.
+# REGLA: el código se asigna SIEMPRE por el NOMBRE en "Ejecutivo".
+# Si "Ejecutivo" está vacío / "0" / no reconocido  ->  Codigo_Vendedor = "0".
+# (Tanto para filas de Excel como de Postgres se usa la misma regla.)
 # Las claves están en minúscula y sin espacios extra para comparar seguro.
 CODIGOS_NOMBRE = {                                              # <<< NUEVO
     "milagros vargas": "16",
@@ -146,15 +139,13 @@ def download_and_process(args):
         df["Fechacreada"] = pd.to_datetime(df["Fechacreada"], errors="coerce").dt.strftime("%d/%m/%Y")
         df["Fechacreada"] = df["Fechacreada"].fillna("-")
  
-    # <<< NUEVO: el Excel ya sabe de quién es -> Codigo_Vendedor seguro.
+    # <<< NUEVO: el código se asigna por el NOMBRE en Ejecutivo de cada fila.
+    # Si Ejecutivo está vacío / "0" / no reconocido -> "0".
     # OJO: NO se toca "Codigo" (ese sigue siendo el de publicaciones del Excel).
-    codigo_vend = CODIGOS_EXCEL.get(file_name)
-    if codigo_vend:
-        df["Codigo_Vendedor"] = codigo_vend
-    else:
-        df["Codigo_Vendedor"] = "0"
+    df["Codigo_Vendedor"] = df["Ejecutivo"].apply(codigo_vendedor_por_nombre)
  
-    print(f"  ✅ {file_name}: {len(df)} filas (Codigo_Vendedor={codigo_vend or '0'})")
+    asignados = (df["Codigo_Vendedor"] != "0").sum()
+    print(f"  ✅ {file_name}: {len(df)} filas ({asignados} con vendedor, {len(df)-asignados} en 0)")
     return df[COLUMNAS]
  
 # ── PostgreSQL ────────────────────────────────────────────
