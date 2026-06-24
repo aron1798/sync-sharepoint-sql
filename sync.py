@@ -25,10 +25,13 @@ SITE_PATH       = "/sites/ASESORASCOMERCIALES"
 SUBFOLDER       = "2. BASE PROSPECTOS/BASE GENERAL"
 SCOPES          = ["Sites.Read.All", "Files.Read.All"]
  
+# IMPORTANTE: "Codigo" = código de PUBLICACIONES (NO se toca).
+# "Codigo_Vendedor" = NUEVA columna con el código de la asesora.   # <<< NUEVO
 COLUMNAS = [
     "Ejecutivo", "Telefono", "Fechacreada", "Sede", "Programa",
     "Turno", "Codigo", "Canal", "Intervalo", "Medio",
-    "Contacto", "Interesado", "Estado", "Objecion", "Observacion"
+    "Contacto", "Interesado", "Estado", "Objecion", "Observacion",
+    "Codigo_Vendedor",                                              # <<< NUEVO
 ]
  
 TABLAS = {
@@ -39,8 +42,8 @@ TABLAS = {
     "Base Dayana Balabarca.xlsx": "Base_Alonso22",
 }
  
-# ── Mapeo de CÓDIGOS ───────────────────────────────────────  # <<< NUEVO
-# Cada Excel ES de una persona conocida -> código seguro por archivo.
+# ── Mapeo de CÓDIGO DE VENDEDOR ────────────────────────────  # <<< NUEVO
+# Cada Excel ES de una persona conocida -> código de vendedor seguro por archivo.
 CODIGOS_EXCEL = {                                               # <<< NUEVO
     "Base Carmen Montoya.xlsx":   "20",
     "Base Milagros Vargas.xlsx":  "16",
@@ -69,8 +72,8 @@ CODIGOS_NOMBRE = {                                              # <<< NUEVO
     "juan carlos aguilar": "23",
 }
  
-def codigo_por_nombre(nombre):                                 # <<< NUEVO
-    """Devuelve el código según el nombre. '0' = sin asignar / no reconocido."""
+def codigo_vendedor_por_nombre(nombre):                        # <<< NUEVO
+    """Devuelve el código de vendedor según el nombre. '0' = sin asignar / no reconocido."""
     if not isinstance(nombre, str):
         return "0"
     return CODIGOS_NOMBRE.get(nombre.strip().lower(), "0")
@@ -143,12 +146,15 @@ def download_and_process(args):
         df["Fechacreada"] = pd.to_datetime(df["Fechacreada"], errors="coerce").dt.strftime("%d/%m/%Y")
         df["Fechacreada"] = df["Fechacreada"].fillna("-")
  
-    # <<< NUEVO: el Excel ya sabe de quién es -> código seguro para TODAS sus filas
-    codigo_fijo = CODIGOS_EXCEL.get(file_name)
-    if codigo_fijo:
-        df["Codigo"] = codigo_fijo
+    # <<< NUEVO: el Excel ya sabe de quién es -> Codigo_Vendedor seguro.
+    # OJO: NO se toca "Codigo" (ese sigue siendo el de publicaciones del Excel).
+    codigo_vend = CODIGOS_EXCEL.get(file_name)
+    if codigo_vend:
+        df["Codigo_Vendedor"] = codigo_vend
+    else:
+        df["Codigo_Vendedor"] = "0"
  
-    print(f"  ✅ {file_name}: {len(df)} filas (Codigo={codigo_fijo or '-'})")
+    print(f"  ✅ {file_name}: {len(df)} filas (Codigo_Vendedor={codigo_vend or '0'})")
     return df[COLUMNAS]
  
 # ── PostgreSQL ────────────────────────────────────────────
@@ -174,11 +180,12 @@ def get_postgres_data():
     df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%d/%m/%Y")
  
     df_mapped = pd.DataFrame("-", index=df.index, columns=COLUMNAS)
-    df_mapped["Ejecutivo"]   = df["name"]
-    df_mapped["Telefono"]    = df["phone_number"]
-    df_mapped["Fechacreada"] = df["created_at"]
-    df_mapped["Canal"]       = "COPITO"
-    df_mapped["Codigo"]      = df["name"].apply(codigo_por_nombre)   # <<< NUEVO
+    df_mapped["Ejecutivo"]       = df["name"]
+    df_mapped["Telefono"]        = df["phone_number"]
+    df_mapped["Fechacreada"]     = df["created_at"]
+    df_mapped["Canal"]           = "COPITO"
+    df_mapped["Codigo_Vendedor"] = df["name"].apply(codigo_vendedor_por_nombre)   # <<< NUEVO
+    # "Codigo" del Postgres queda en "-" (no hay código de publicación aquí)
  
     print(f"  ✅ PostgreSQL: {len(df_mapped)} filas")
     return df_mapped
@@ -216,8 +223,8 @@ all_dfs.append(df_pg)
 df_final = pd.concat(all_dfs, ignore_index=True)
 df_final = df_final.fillna("-").astype(str).replace("nan", "-")
  
-# <<< NUEVO: por si quedó algún Codigo vacío tras el fillna, dejarlo en '0'
-df_final["Codigo"] = df_final["Codigo"].replace(["-", "nan", ""], "0")
+# <<< NUEVO: si algún Codigo_Vendedor quedó vacío tras el fillna, dejarlo en '0'
+df_final["Codigo_Vendedor"] = df_final["Codigo_Vendedor"].replace(["-", "nan", ""], "0")
  
 print(f"\n✅ Total unificado: {len(df_final)} filas")
  
@@ -237,5 +244,3 @@ for i in range(0, len(records), batch_size):
 duracion = time.time() - inicio
 print(f"\n🎉 Completado en {duracion:.1f} segundos")
  
-
-
