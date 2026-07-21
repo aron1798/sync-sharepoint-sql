@@ -91,6 +91,20 @@ def codigo_vendedor_por_nombre(nombre):
     return CODIGOS_NOMBRE.get(nombre.strip().lower(), "0")
 
 
+def _tel_valido(v):
+    """True si el teléfono es real. Descarta: vacío, '0', solo ceros,
+    '-', 'nan', y números de 6 dígitos o menos (relleno de los Excel)."""
+    s = str(v or "")
+    for x in ("+51", "+", " ", "-", "(", ")", ".0"):
+        s = s.replace(x, "")
+    s = s.strip()
+    if not s or s in ("-", "nan") or set(s) == {"0"}:
+        return False
+    if s.isdigit() and len(s) <= 6:
+        return False
+    return True
+
+
 # ── SharePoint ────────────────────────────────────────────
 def get_access_token():
     app = msal.PublicClientApplication(
@@ -139,7 +153,6 @@ def download_and_process(args):
     url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{file_id}/content"
     r = requests.get(url, headers=headers)
     r.raise_for_status()
-
     nombre_tabla = TABLAS.get(file_name)
     wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
     df = None
@@ -154,19 +167,15 @@ def download_and_process(args):
                 break
     if df is None:
         df = pd.read_excel(io.BytesIO(r.content))
-
     for col in COLUMNAS:
         if col not in df.columns:
             df[col] = "-"
-
     if "Fechacreada" in df.columns:
         df["Fechacreada"] = pd.to_datetime(df["Fechacreada"], errors="coerce").dt.strftime("%d/%m/%Y")
         df["Fechacreada"] = df["Fechacreada"].fillna("-")
-
     # CÓDIGO POR TABLA: todas las filas de este Excel llevan el código del archivo.
     # (Robusto a errores de tipeo en la columna Ejecutivo.) NO se toca "Codigo".
     df["Codigo_Vendedor"] = CODIGOS_TABLA.get(nombre_tabla, "0")
-
     asignados = (df["Codigo_Vendedor"] != "0").sum()
     print(f"  ✅ {file_name}: {len(df)} filas ({asignados} con vendedor, {len(df)-asignados} en 0)")
     return df[COLUMNAS]
@@ -188,12 +197,10 @@ def get_postgres_data():
     """
     df = pd.read_sql(query, conn)
     conn.close()
-
     df["phone_number"] = df["phone_number"].astype(str)
     df["phone_number"] = df["phone_number"].str.replace(r"^\+51", "", regex=True)
     df["phone_number"] = df["phone_number"].str.replace("+", "", regex=False)
     df["created_at"] = pd.to_datetime(df["created_at"]).dt.strftime("%d/%m/%Y")
-
     df_mapped = pd.DataFrame("-", index=df.index, columns=COLUMNAS)
     df_mapped["Ejecutivo"]       = df["name"]
     df_mapped["Telefono"]        = df["phone_number"]
@@ -201,7 +208,6 @@ def get_postgres_data():
     df_mapped["Canal"]           = "COPITO"
     # Postgres: código POR NOMBRE del agente (aquí no hay archivo/tabla).
     df_mapped["Codigo_Vendedor"] = df["name"].apply(codigo_vendedor_por_nombre)
-
     print(f"  ✅ PostgreSQL: {len(df_mapped)} filas")
     return df_mapped
 
@@ -240,7 +246,13 @@ df_final = pd.concat(all_dfs, ignore_index=True)
 df_final = df_final.fillna("-").astype(str).replace("nan", "-")
 df_final["Codigo_Vendedor"] = df_final["Codigo_Vendedor"].replace(["-", "nan", ""], "0")
 
-print(f"\n✅ Total unificado: {len(df_final)} filas")
+# ── FILTRO FINAL: quitar teléfonos '0'/vacíos/relleno ──────────────
+# Los Excel inflados a 10000 traen miles de filas con Telefono = '0'.
+# No deben subir a datos_unificados.
+antes = len(df_final)
+df_final = df_final[df_final["Telefono"].apply(_tel_valido)].reset_index(drop=True)
+print(f"\n🧹 Descartadas (teléfono 0/vacío): {antes - len(df_final)}")
+print(f"✅ Total unificado (válido): {len(df_final)} filas")
 
 # 5. Subir a Supabase con TRUNCATE
 print("\n🗑️  Truncando tabla anterior...")
